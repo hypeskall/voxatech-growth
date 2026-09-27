@@ -2,9 +2,13 @@ import { management } from "./shared.mjs";
 const origin = new URL(process.env.APP_URL || "http://localhost:3000").origin;
 if (!origin.startsWith("https://") && origin !== "http://localhost:3000")
   throw new Error("APP_URL must use HTTPS except localhost development.");
+const callbackUrls = new Set([`${origin}/auth/callback`]);
+if (origin !== "http://localhost:3000") {
+  callbackUrls.add("http://localhost:3000/auth/callback");
+}
 const desired = {
   site_url: origin,
-  uri_allow_list: `${origin}/auth/callback`,
+  uri_allow_list: [...callbackUrls].join(","),
   disable_signup: true,
   external_email_enabled: true,
   external_anonymous_users_enabled: false,
