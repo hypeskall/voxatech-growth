@@ -1,0 +1,15 @@
+node_modules/
+.next/
+.vercel/
+.env*
+!.env.example
+.npm-cache/
+coverage/
+*.log
+*.tsbuildinfo
+verification.local.json
+Thumbs.db
+.DS_Store
+AGENTS.md
+CLAUDE.md
+scripts/evaluation-leads.local.json
