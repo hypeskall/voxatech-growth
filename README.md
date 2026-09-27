@@ -135,7 +135,7 @@ Configurează prețul și cheile de test. Înregistrează `https://<app>/api/web
 
 ## Cron
 
-`vercel.json` programează `/api/cron` la fiecare 15 minute. Endpoint-ul verifică `Authorization: Bearer <CRON_SECRET>` constant-time. Vercel trimite automat headerul configurat. [Hobby permite doar cron zilnic](https://vercel.com/docs/cron-jobs/usage-and-pricing); frecvența cerută necesită un plan compatibil.
+Programarea Vercel Cron este dezactivată în configurația inițială. Endpoint-ul `/api/cron` verifică în continuare `Authorization: Bearer <CRON_SECRET>` constant-time și nu rulează fără un secret valid. La lansare, adaugă programarea de 15 minute în `vercel.json` numai împreună cu un plan compatibil și după activarea deliberată a livrării.
 
 Worker-ul are maximum 300 secunde, revendică pe rând joburi cu lease de cinci minute și oprește revendicările înainte de expirarea bugetului. Erorile au backoff exponențial; așteptarea intervalului de trimitere nu consumă retry-uri. Scheduler-ul și plățile sunt idempotente. Local folosește **Setări → Procesează acum**; nu există cron local automat.
 
