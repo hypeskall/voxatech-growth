@@ -473,3 +473,30 @@ test("cost reuse upgrades stale unsent drafts once and protects approvals and se
     true,
   );
 });
+
+test("sparse outreach cannot invent an operational diagnosis or use a product-summary subject", () => {
+  assert.ok(
+    scoreSubject("Programări simplificate pentru Maria", context).issues.length,
+  );
+  const c = buildLeadContext({
+    company_name: "Clinica Maria",
+    niche: "stomatologie",
+  });
+  const value = output({
+    personalization_reason: null,
+    email_body: body.replace(
+      `Am văzut pe site: ${fact}`,
+      "Programările la Clinica Maria consumă timpul recepției.",
+    ),
+  });
+  assert.throws(() => validateOutreach(value, c), /diagnostic/);
+});
+test("a tentative benefit is not counted as an extra CTA", () => {
+  const value = output({
+    email_body: body.replace(
+      "Ideea este să rămână",
+      "Cred că v-ar fi util să rămână",
+    ),
+  });
+  assert.doesNotThrow(() => validateOutreach(value, context));
+});
