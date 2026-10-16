@@ -697,7 +697,8 @@ export function GmailInbox({
         <div>
           <h2>Răspunsurile tale, într-un singur loc.</h2>
           <p>
-            Răspunsurile din căsuțele tale Gmail, împreună cu istoricul Voxa.
+            Toate răspunsurile la emailurile Voxa, într-un singur loc. Tu
+            răspunzi; AI-ul doar clasifică.
           </p>
         </div>
         <Button
@@ -899,6 +900,7 @@ export function GmailInbox({
                         )}
                       {message.direction === "outbound" &&
                         message.status === "draft" &&
+                        (!message.in_reply_to || meta.manual_reply === true) &&
                         manager && (
                           <Button
                             size="sm"
@@ -933,15 +935,34 @@ export function GmailInbox({
                       lead_id: active,
                       inbound_id: received?.id,
                       body: String(new FormData(form).get("body")),
+                      send:
+                        (e.nativeEvent as SubmitEvent).submitter?.getAttribute(
+                          "value",
+                        ) === "send",
                     });
                     setBusy(false);
-                    if (result) form.reset();
+                    if (result) {
+                      form.reset();
+                      setNotice(
+                        (result as { queued?: boolean }).queued
+                          ? "Răspunsul tău a fost pus la trimitere. Se aplică limitele căsuței și programul campaniei."
+                          : "Ciorna a fost salvată. Nu s-a trimis niciun email.",
+                      );
+                    }
                   }}
                 >
                   <label className="field">
                     Răspuns manual către {lead.email}
                     <textarea
-                      key={active}
+                      key={received.id}
+                      defaultValue={
+                        thread.find(
+                          (m) =>
+                            m.in_reply_to === received.id &&
+                            m.status === "draft" &&
+                            metadata(m.metadata).manual_reply === true,
+                        )?.body || ""
+                      }
                       name="body"
                       required
                       maxLength={20000}
@@ -949,7 +970,27 @@ export function GmailInbox({
                       placeholder="Scrie răspunsul tău…"
                     />
                   </label>
-                  <Button disabled={busy || lead.do_not_contact}>
+                  <p>
+                    Din:{" "}
+                    {String(
+                      metadata(received.metadata).mailbox_email ||
+                        "căsuța care a primit mesajul",
+                    )}
+                    . Răspunsul păstrează conversația Gmail.
+                  </p>
+                  <Button
+                    name="intent"
+                    value="send"
+                    disabled={busy || lead.do_not_contact}
+                  >
+                    Trimite răspunsul
+                  </Button>
+                  <Button
+                    name="intent"
+                    value="draft"
+                    variant="secondary"
+                    disabled={busy || lead.do_not_contact}
+                  >
                     Salvează ciorna
                   </Button>
                 </form>

@@ -170,3 +170,23 @@ export const dateTime = (s: string | null | undefined) =>
         timeZone: "Europe/Bucharest",
       }).format(new Date(s))
     : "—";
+
+/** Replies require a human-written draft and explicit approval before delivery. */
+export function canDeliverReply(message: {
+  in_reply_to: string | null;
+  approved_by?: string | null;
+  metadata: unknown;
+}) {
+  if (!message.in_reply_to) return true;
+  const meta =
+    message.metadata &&
+    typeof message.metadata === "object" &&
+    !Array.isArray(message.metadata)
+      ? (message.metadata as Record<string, unknown>)
+      : {};
+  return (
+    meta.manual_reply === true &&
+    meta.human_approved === true &&
+    !!message.approved_by
+  );
+}

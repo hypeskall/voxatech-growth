@@ -633,6 +633,10 @@ export async function POST(req: NextRequest) {
           !Array.isArray(m.metadata)
             ? m.metadata
             : {};
+        if (m.in_reply_to && messageMetadata.manual_reply !== true)
+          throw new Error(
+            "Răspunsurile AI sunt oprite. Scrie răspunsul tău în Inbox.",
+          );
         const isReviewVariant =
           action === "message_approve" &&
           ["A", "B"].includes(String(messageMetadata.outreach_variant || ""));
@@ -948,7 +952,8 @@ export async function POST(req: NextRequest) {
         const input = z
           .object({
             lead_id: z.uuid(),
-            body: z.string().min(1).max(20000),
+            body: z.string().trim().min(1).max(20000),
+            send: z.boolean().default(false),
             inbound_id: z.uuid().optional(),
           })
           .parse(data);
@@ -995,6 +1000,17 @@ export async function POST(req: NextRequest) {
         )[0];
         if (input.inbound_id && !inbound)
           throw new Error("Răspunsul ales nu aparține acestei conversații.");
+        if (!inbound)
+          throw new Error("Alege un mesaj primit pentru a răspunde.");
+        const parentMetadata = metadataObject(inbound.metadata);
+        if (parentMetadata.sender_mismatch)
+          throw new Error(
+            "Expeditor diferit de prospect. Verifică mesajul în Gmail înainte de a răspunde.",
+          );
+        if (input.send && process.env.EMAIL_DELIVERY_MODE !== "live")
+          throw new Error(
+            "Trimiterea este în modul de test. Poți salva ciorna; niciun email nu este trimis.",
+          );
         const previousReply = inbound
           ? check(
               await db
@@ -1002,6 +1018,7 @@ export async function POST(req: NextRequest) {
                 .select("id,status,idempotency_key,metadata,updated_at")
                 .eq("organization_id", s.org)
                 .eq("in_reply_to", inbound.id)
+                .neq("status", "cancelled")
                 .maybeSingle(),
             )
           : null;
@@ -1025,17 +1042,19 @@ export async function POST(req: NextRequest) {
               ? inbound.subject
               : `Re: ${inbound.subject}`
             : `Re: ${lead.company_name}`,
-          status: "draft",
+          status: input.send ? "approved" : "draft",
           idempotency_key:
             previousReply?.idempotency_key || crypto.randomUUID(),
-          approved_by: null,
-          approved_at: null,
+          approved_by: input.send ? s.user.id : null,
+          approved_at: input.send ? new Date().toISOString() : null,
           metadata: {
             ...metadataObject(previousReply?.metadata),
-            review_state: "draft",
-            human_approved: false,
+            manual_reply: true,
+            review_state: input.send ? "approved" : "draft",
+            human_approved: input.send,
           },
         };
+        let replyId: string;
         if (previousReply) {
           const updated = await root
             .from("messages")
@@ -1050,8 +1069,24 @@ export async function POST(req: NextRequest) {
             throw new Error(
               "Răspunsul a început să fie trimis. Actualizează istoricul înainte de modificare.",
             );
-          check(updated);
-        } else check(await root.from("messages").insert(replyValues));
+          replyId = check(updated).id;
+        } else
+          replyId = check(
+            await root
+              .from("messages")
+              .insert(replyValues)
+              .select("id")
+              .single(),
+          ).id;
+        if (input.send)
+          await enqueue(
+            s.org,
+            "send_due_messages",
+            `send:live:${replyId}`,
+            lead.id,
+            { message_id: replyId },
+          );
+        result = { ok: true, message_id: replyId, queued: input.send };
         break;
       }
       case "knowledge_save": {

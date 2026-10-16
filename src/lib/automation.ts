@@ -12,7 +12,13 @@ import { sendOrganizationEmail } from "./providers/email";
 import { GmailDeferredError, GmailStoppedError } from "./gmail-api";
 import { syncGmail } from "./gmail-sync";
 import { readPublicWebsite } from "./website";
-import { aiThinkingLevel, bucharest, humanRequired, type Row } from "./domain";
+import {
+  aiThinkingLevel,
+  bucharest,
+  humanRequired,
+  canDeliverReply,
+  type Row,
+} from "./domain";
 import {
   outreachCopyVersion,
   buildLeadContext,
@@ -59,11 +65,6 @@ const replyClassificationSchema = z.object({
   summary: z.string(),
   is_hot_lead: z.boolean(),
   hot_reason: z.string().nullable(),
-});
-const replyDraftSchema = z.object({
-  subject: z.string(),
-  body: z.string(),
-  knowledge_ids: z.array(z.string()),
 });
 const payloadSchema = z.object({
   message_id: z.uuid().optional(),
@@ -189,16 +190,6 @@ async function generation<T>(
       ),
   );
   return result;
-}
-async function knowledge(org: string) {
-  return check(
-    await admin()
-      .from("knowledge_base_documents")
-      .select("id,title,content")
-      .eq("organization_id", org)
-      .eq("active", true)
-      .is("deleted_at", null),
-  ).slice(0, 30);
 }
 async function conversation(org: string, lead: string) {
   return check(
@@ -536,12 +527,10 @@ async function draft(
     );
   } else {
     check(
-      await admin()
-        .from("messages")
-        .upsert(changes, {
-          onConflict: "organization_id,idempotency_key",
-          ignoreDuplicates: !variant,
-        }),
+      await admin().from("messages").upsert(changes, {
+        onConflict: "organization_id,idempotency_key",
+        ignoreDuplicates: !variant,
+      }),
     );
   }
   return generated;
@@ -573,17 +562,6 @@ async function incoming(job: Job, lead: Row<"leads">) {
       .single(),
   );
   if (lead.do_not_contact) return;
-  if (
-    check(
-      await admin()
-        .from("messages")
-        .select("id")
-        .eq("organization_id", job.organization_id)
-        .eq("idempotency_key", `reply:${inbound.id}`)
-        .maybeSingle(),
-    )
-  )
-    return;
   if (humanRequired(inbound.body)) {
     await attention(
       job.organization_id,
@@ -690,54 +668,6 @@ async function incoming(job: Job, lead: Row<"leads">) {
     await attention(job.organization_id, lead, classification.value.summary);
     return;
   }
-  const docs = await knowledge(job.organization_id);
-  const response = await generation(
-    job.organization_id,
-    lead,
-    classification.value.classification === "objection"
-      ? "objection_reply"
-      : "inbound_reply",
-    replyDraftSchema,
-    JSON.stringify({
-      task: "Răspunde scurt și natural în română folosind numai documentele furnizate. Pentru interes pozitiv oferă un demo personalizat sau test. Nu inventa și nu negocia. Dacă documentele nu susțin un răspuns sigur, lasă body gol.",
-      classification: classification.value,
-      message: inbound.body,
-      lead_summary: lead.website_summary,
-      knowledge: docs,
-    }),
-  );
-  const citations = response.value.knowledge_ids.filter((id) =>
-    docs.some((d) => d.id === id),
-  );
-  if (!response.value.body || !citations.length) {
-    await attention(job.organization_id, lead, classification.value.summary);
-    return;
-  }
-  const campaign = await campaignFor(job.organization_id, lead.id);
-  check(
-    await admin()
-      .from("messages")
-      .upsert(
-        {
-          organization_id: job.organization_id,
-          lead_id: lead.id,
-          conversation_id: inbound.conversation_id,
-          campaign_id: campaign?.id,
-          in_reply_to: inbound.id,
-          direction: "outbound",
-          subject: response.value.subject,
-          body: response.value.body,
-          idempotency_key: `reply:${inbound.id}`,
-          knowledge_document_ids: citations,
-          model: response.model,
-          status: campaign?.mode === "automatic" ? "queued" : "draft",
-        },
-        {
-          onConflict: "organization_id,idempotency_key",
-          ignoreDuplicates: true,
-        },
-      ),
-  );
   check(
     await admin()
       .from("leads")
@@ -802,6 +732,26 @@ async function recordDelivery(
 async function send(job: Job) {
   const p = payloadSchema.parse(job.payload);
   if (!p.message_id) throw new Error("Mesaj lipsă.");
+  // Old queued AI replies must never be delivered, including in simulation mode.
+  const pending = check(
+    await admin()
+      .from("messages")
+      .select("*")
+      .eq("id", p.message_id)
+      .eq("organization_id", job.organization_id)
+      .single(),
+  );
+  if (!canDeliverReply(pending)) {
+    if (["draft", "approved", "queued", "sending"].includes(pending.status))
+      check(
+        await admin()
+          .from("messages")
+          .update({ status: "cancelled" })
+          .eq("id", pending.id)
+          .eq("organization_id", job.organization_id),
+      );
+    return;
+  }
   if (process.env.EMAIL_DELIVERY_MODE !== "live") {
     const simulated = check(
       await admin().rpc("simulate_outbound_message", {

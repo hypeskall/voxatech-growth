@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   sendingWindow,
+  canDeliverReply,
   aiThinkingLevel,
   humanRequired,
   normalizePhone,
@@ -78,6 +79,30 @@ test("input schemas reject dangerous URLs and invalid campaign windows", () => {
       window_start: "09:30",
       window_end: "16:30",
     }).success,
+    true,
+  );
+});
+
+test("only explicitly approved human replies can reach delivery", () => {
+  const reply = {
+    in_reply_to: "inbound",
+    approved_by: "owner",
+    metadata: { manual_reply: true, human_approved: true },
+  };
+  assert.equal(canDeliverReply(reply), true);
+  assert.equal(
+    canDeliverReply({ ...reply, metadata: { human_approved: true } }),
+    false,
+  );
+  assert.equal(
+    canDeliverReply({ ...reply, metadata: { manual_reply: true } }),
+    false,
+  );
+  assert.equal(canDeliverReply({ ...reply, approved_by: null }), false);
+  assert.equal(canDeliverReply({ ...reply, metadata: null }), false);
+  assert.equal(canDeliverReply({ ...reply, metadata: [] }), false);
+  assert.equal(
+    canDeliverReply({ ...reply, in_reply_to: null, metadata: null }),
     true,
   );
 });
