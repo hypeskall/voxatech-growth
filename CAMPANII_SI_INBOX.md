@@ -28,3 +28,14 @@ WhatsApp, ElevenLabs și Stripe au fost eliminate din interfața de integrări �
 - Dashboard: răspunsul de date a scăzut de la 271.733 la 47.282 bytes, aproximativ 83%. Cererile de verificare au durat 3.118 ms înainte și 1.206 ms după; acestea sunt măsurători punctuale, nu o garanție pentru orice conexiune.
 - Ultima publicare: `dpl_7ghPih7BkcnKDjY1oLamhznEfm14`, READY, pe `https://voxa-growth.vercel.app`.
 - Stare la publicare: 9 Gmail conectate și testate, câte 10 trimiteri/zi; Gemini 3.1 Flash-Lite; livrare `log`; Autopilot în pauză. Nu au fost trimise emailuri către leaduri în timpul verificării.
+
+
+## Programul de trimitere
+
+Autopilot trimite abordările inițiale luni–vineri, între **08:00 și 12:00**, ora `Europe/Bucharest`. Sâmbăta și duminica sunt zile de pauză. Schimbarea orei de vară/iarnă este automată. Limita rămâne 10 per căsuță pe zi, cu minimum 10 minute între rezervările Gmail ale aceleiași căsuțe. Mesajele rămase așteaptă următoarea fereastră; nu se recuperează limita nefolosită în weekend.
+
+Programul este verificat în baza de date la rezervarea mesajului și încă o dată chiar înaintea trimiterii prin Gmail. Se aplică și campaniilor Gmail existente și este păstrat când Autopilot este repornit. Sincronizarea răspunsurilor continuă și în afara programului. Trimiterile tranzacționale solicitate explicit de lead au regulile lor existente.
+
+Alegerea este un punct de pornire, nu o promisiune pentru toate clinicile din România. Studiul Belkins din 2026 (7,5 milioane de emailuri B2B din 2025) favorizează 08:00–12:00. Duminica are o rată brută ridicată, dar autorii avertizează că volumul este foarte mic și publicul selectiv. Nu există dovadă specifică pentru stomatologii români. Comparați răspunsurile interesate și întâlnirile, nu doar numărul total de răspunsuri.
+
+Surse: https://belkins.io/blog/best-time-to-send-email și https://instantly.ai/blog/best-time-to-send-cold-email/

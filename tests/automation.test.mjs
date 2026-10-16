@@ -9,13 +9,26 @@ import {
   leadInput,
   campaignInput,
 } from "../src/lib/domain.ts";
-test("Bucharest sending window honors summer time, boundaries, and weekends", () => {
-  assert.equal(sendingWindow(new Date("2026-09-25T06:30:00Z")), true);
-  assert.equal(sendingWindow(new Date("2026-09-25T06:29:00Z")), false);
-  assert.equal(sendingWindow(new Date("2026-09-25T13:30:00Z")), false);
-  assert.equal(sendingWindow(new Date("2026-09-26T08:00:00Z")), false);
-  assert.equal(sendingWindow(new Date("2026-01-09T07:30:00Z")), true);
+test("Bucharest morning window respects every weekday, weekends, boundaries and DST", () => {
+  // Monday–Friday use the same evidence-backed morning interval.
+  for (const day of [19, 20, 21, 22, 23]) {
+    assert.equal(sendingWindow(new Date(`2026-10-${day}T04:59:59Z`)), false);
+    assert.equal(sendingWindow(new Date(`2026-10-${day}T05:00:00Z`)), true);
+    assert.equal(sendingWindow(new Date(`2026-10-${day}T08:59:59Z`)), true);
+    assert.equal(sendingWindow(new Date(`2026-10-${day}T09:00:00Z`)), false);
+  }
+  for (const day of [24, 25])
+    assert.equal(sendingWindow(new Date(`2026-10-${day}T08:00:00Z`)), false);
+  // Romania changes from UTC+3 to UTC+2 on 25 October.
+  assert.equal(sendingWindow(new Date("2026-10-26T05:59:59Z")), false);
+  assert.equal(sendingWindow(new Date("2026-10-26T06:00:00Z")), true);
+  assert.equal(sendingWindow(new Date("2026-10-26T10:00:00Z")), false);
+  assert.equal(sendingWindow(new Date("2026-01-09T06:00:00Z")), true);
   assert.equal(bucharest(new Date("2026-09-25T15:30:00Z")).time, "18:30");
+  assert.equal(
+    sendingWindow(new Date("2026-10-19T11:00:00Z"), "13:00", "15:00"),
+    true,
+  );
 });
 test("Gemini thinking levels separate volume work from conversations", () => {
   for (const workflow of [

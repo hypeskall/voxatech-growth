@@ -1712,6 +1712,39 @@ test("Gmail Start and Pause are atomic, preserve one campaign per mailbox and re
       )
     ).rows[0].campaign_id;
     assert.equal(await call(true), 1);
+    // Restarting Autopilot must retain the morning policy used by reservation
+    // and the final Gmail delivery recheck, including local timezone handling.
+    const schedule = (
+      await db.query(
+        "select window_start::text,window_end::text,weekdays_only,daily_cap from public.campaigns where id=$1",
+        [first],
+      )
+    ).rows[0];
+    assert.deepEqual(schedule, {
+      window_start: "08:00:00",
+      window_end: "12:00:00",
+      weekdays_only: true,
+      daily_cap: 10,
+    });
+    for (const [instant, expected] of [
+      ["2026-10-19T04:59:59Z", false],
+      ["2026-10-19T05:00:00Z", true],
+      ["2026-10-19T08:59:59Z", true],
+      ["2026-10-19T09:00:00Z", false],
+      ["2026-10-24T08:00:00Z", false],
+      ["2026-10-25T08:00:00Z", false],
+      ["2026-10-26T05:59:59Z", false],
+      ["2026-10-26T06:00:00Z", true],
+    ]) {
+      const result = await db.query(
+        `select not ((c.weekdays_only and extract(isodow from t.local_now)>5)
+        or t.local_now::time<c.window_start or t.local_now::time>=c.window_end) allowed
+        from public.campaigns c cross join (select $2::timestamptz at time zone 'Europe/Bucharest' local_now) t
+        where c.id=$1`,
+        [first, instant],
+      );
+      assert.equal(result.rows[0].allowed, expected, instant);
+    }
     assert.equal(
       (
         await db.query(
@@ -1985,9 +2018,16 @@ test("niche campaigns scope 2,000-lead pools, block live switches and isolate te
 });
 
 test("new Gmail mailboxes default to ten daily sends", async () => {
-  await db.exec('begin');
+  await db.exec("begin");
   try {
-    const account=(await db.query("insert into public.gmail_accounts(organization_id,email,google_subject,encrypted_refresh_token) values($1,'default-ten@gmail.com','default-ten','encrypted-fixture') returning daily_cap",[orgA])).rows[0];
-    assert.equal(account.daily_cap,10);
-  } finally {await db.exec('rollback');}
+    const account = (
+      await db.query(
+        "insert into public.gmail_accounts(organization_id,email,google_subject,encrypted_refresh_token) values($1,'default-ten@gmail.com','default-ten','encrypted-fixture') returning daily_cap",
+        [orgA],
+      )
+    ).rows[0];
+    assert.equal(account.daily_cap, 10);
+  } finally {
+    await db.exec("rollback");
+  }
 });

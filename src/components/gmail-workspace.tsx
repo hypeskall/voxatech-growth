@@ -251,9 +251,9 @@ export function GmailAccountsPanel({ data, manager, refresh }: Props) {
         </div>
       )}
       <p className="gmail-footnote">
-        <ShieldCheck size={15} aria-hidden="true" />10 trimiteri pe zi implicit,
-        maximum 10. Testele și toate campaniile împart aceeași limită; aceasta
-        nu garantează livrarea în inbox.
+        <ShieldCheck size={15} aria-hidden="true" />
+        10 trimiteri pe zi implicit, maximum 10. Testele și toate campaniile
+        împart aceeași limită; aceasta nu garantează livrarea în inbox.
       </p>
       <Modal
         open={!!testAccount}
@@ -447,9 +447,9 @@ export function GmailAutopilotPanel({ data, manager, refresh }: Props) {
               : "Pornește Autopilot"}
           </Button>
           <small>
-            Luni–vineri, 09:30–16:30
+            Luni–vineri, 08:00–12:00
             <br />
-            Ora României
+            Ora României · Weekend: pauză
           </small>
         </div>
       </section>
@@ -507,7 +507,7 @@ export function GmailAutopilotPanel({ data, manager, refresh }: Props) {
                 )
               ? "Limitele de azi sunt atinse. Trimiterile se reiau în următoarea zi de lucru."
               : !sendingWindow(new Date())
-                ? "Autopilot așteaptă intervalul de trimitere: luni–vineri, 09:30–16:30."
+                ? "Autopilot așteaptă intervalul de trimitere: luni–vineri, 08:00–12:00."
                 : !candidates.length &&
                     !data.campaign_leads.some(
                       (member) =>
