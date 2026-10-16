@@ -2,7 +2,12 @@ import "server-only";
 import { z } from "zod";
 class DeferredSend extends Error {}
 import { admin, check, enqueue, log, appUrl, safeError, type Job } from "./db";
-import { getAIProvider, safetyPrompt, type AIProviderId } from "./providers/ai";
+import {
+  getAIProvider,
+  safetyPrompt,
+  type AIProviderId,
+  type AIThinkingLevel,
+} from "./providers/ai";
 import { sendOrganizationEmail } from "./providers/email";
 import { GmailDeferredError, GmailStoppedError } from "./gmail-api";
 import { syncGmail } from "./gmail-sync";
@@ -10,11 +15,14 @@ import { readPublicWebsite } from "./website";
 import { aiThinkingLevel, bucharest, humanRequired, type Row } from "./domain";
 import {
   outreachCopyVersion,
-  verifiedOutreachFact,
-  outreachInstructions,
-  validateOutreach,
+  buildLeadContext,
+  generateOutreach,
+  outreachOutputSchema,
+  outreachSystemPrompt,
+  OutreachQualityError,
+  researchExcerpt,
+  reuseOutreachDraft,
 } from "./outreach-template";
-import { optOutLine } from "./launch";
 import type { Json } from "./supabase/database.types";
 const evidence = z.object({
   value: z.string().nullable(),
@@ -31,35 +39,10 @@ const researchSchema = z.object({
   limited_hours: evidence,
   no_visible_automation: evidence,
   personalization: evidence,
+  current_tools: z.array(evidence).max(3),
+  operational_workflow: evidence,
+  website_need: evidence,
 });
-const draftSchema = z.object({
-  subject: z.string(),
-  body: z.string(),
-  fact_used: z.string().nullable(),
-  knowledge_ids: z.array(z.string()),
-});
-const draftPairSchema = z.object({
-  variant_a: draftSchema,
-  variant_b: draftSchema,
-});
-
-function validateReviewDraft(
-  draft: z.infer<typeof draftSchema>,
-  lead: Row<"leads">,
-) {
-  validateOutreach(draft.body, lead.company_name);
-  if (!draft.body.includes(optOutLine))
-    throw new Error("Linia opt-out lipsește.");
-  if (
-    draft.fact_used !== null &&
-    draft.fact_used !== verifiedOutreachFact(lead)
-  )
-    throw new Error("Fapt neverificat în ciornă.");
-  if (
-    draft.subject !== `30 de zile gratuite cu Voxa pentru ${lead.company_name}`
-  )
-    throw new Error("Subiectul aprobat lipsește.");
-}
 const replyClassificationSchema = z.object({
   classification: z.enum([
     "positive",
@@ -103,6 +86,7 @@ async function generation<T>(
   schema: z.ZodType<T>,
   prompt: string,
   includePayload = false,
+  thinkingOverride?: AIThinkingLevel,
 ) {
   const cfg = await config(org);
   const providerId = z
@@ -114,7 +98,7 @@ async function generation<T>(
   const model =
     models.data?.default ||
     process.env.DEFAULT_AUTOMATION_MODEL ||
-    "gemini-3.8-flash";
+    "gemini-3.1-flash-lite";
   const costs = z
     .object({
       input_per_million: z.number().nonnegative(),
@@ -122,8 +106,11 @@ async function generation<T>(
     })
     .safeParse(cfg.costs);
   const provider = getAIProvider(providerId);
-  const thinkingLevel = aiThinkingLevel(name);
-  const system = `${safetyPrompt}\n${typeof cfg.ai_system_prompt === "string" ? cfg.ai_system_prompt : ""}\nRegulile de siguranță de mai sus au prioritate.`;
+  const thinkingLevel = thinkingOverride || aiThinkingLevel(name);
+  const system =
+    name === "outreach"
+      ? `${safetyPrompt}\n${outreachSystemPrompt}`
+      : `${safetyPrompt}\n${typeof cfg.ai_system_prompt === "string" ? cfg.ai_system_prompt : ""}\nRegulile de siguranță de mai sus au prioritate.`;
   const result = await provider
     .generate({
       model,
@@ -132,13 +119,16 @@ async function generation<T>(
       system,
       prompt,
       thinkingLevel,
+      ...(name === "outreach"
+        ? { limits: { timeoutMs: 30000, maxOutputTokens: 2200, attempts: 1 } }
+        : {}),
       pricing: {
         inputPerMillion:
           costs.data?.input_per_million ??
-          Number(process.env.GEMINI_INPUT_COST_PER_MILLION || 0.75),
+          Number(process.env.GEMINI_INPUT_COST_PER_MILLION || 0.25),
         outputPerMillion:
           costs.data?.output_per_million ??
-          Number(process.env.GEMINI_OUTPUT_COST_PER_MILLION || 3.75),
+          Number(process.env.GEMINI_OUTPUT_COST_PER_MILLION || 1.5),
       },
     })
     .catch(async (error) => {
@@ -168,7 +158,14 @@ async function generation<T>(
     ...(includePayload
       ? {
           input: { instructions: system, prompt },
-          output: result.value,
+          output:
+            name === "outreach"
+              ? {
+                  subject: (result.value as { subject?: string }).subject,
+                  email_body: (result.value as { email_body?: string })
+                    .email_body,
+                }
+              : result.value,
         }
       : {}),
   } as Json;
@@ -285,7 +282,7 @@ async function enrichFromText(
     lead,
     "research",
     researchSchema,
-    `Extrage numai fapte explicite din pagina următoare. Fiecare fapt are un citat exact din sursă; fără dovadă, value și quote sunt null. Pentru câmpuri booleene folosește da/nu numai când textul susține explicit. Absența unei mențiuni nu dovedește absența funcției.\n${text}`,
+    `Extrage numai fapte explicite din pagina următoare. Fiecare fapt are un citat exact din sursă; fără dovadă, value și quote sunt null. Pentru câmpuri booleene folosește da/nu numai când textul susține explicit. Absența unei mențiuni nu dovedește absența funcției. current_tools include numai instrumente numite explicit; operational_workflow numai fluxuri descrise explicit; website_need numai o nevoie de website afirmată explicit, niciodată o presupunere despre design. personalization trebuie să fie o propoziție factuală scurtă, naturală, fără complimente, susținută de citat.\n${researchExcerpt(text)}`,
     includePayload,
   );
   const { value } = generated;
@@ -297,9 +294,12 @@ async function enrichFromText(
       : null;
   const facts = Object.fromEntries(
     Object.entries(value)
-      .filter(([k]) => k !== "services")
+      .filter(([k]) => !["services", "current_tools"].includes(k))
       .map(([k, v]) => [k, verified(v as z.infer<typeof evidence>)]),
   );
+  const currentTools = value.current_tools
+    .map(verified)
+    .filter((v): v is string => !!v);
   const services = value.services.map(verified).filter((v): v is string => !!v);
   const reasons: { reason: string; points: number }[] = [];
   for (const [key, label, points] of [
@@ -335,7 +335,7 @@ async function enrichFromText(
         opening_hours: facts.hours ? { text: facts.hours } : null,
         personalization_fact: facts.personalization,
         website_summary: `${lead.company_name}: ${facts.niche || "specialitate necunoscută"}. Servicii: ${services.join(", ") || "necunoscute"}. Program: ${summaryHours}.`,
-        verified_facts: facts,
+        verified_facts: { ...facts, current_tools: currentTools },
         lead_score: score,
         lead_temperature: score >= 80 ? "hot" : score >= 45 ? "warm" : "cold",
         score_reasons: reasons,
@@ -369,9 +369,39 @@ async function enrich(job: Job, lead: Row<"leads">) {
     );
     return;
   }
-  await enrichFromText(job, lead, await readPublicWebsite(lead.website));
+  let text: string;
+  try {
+    text = await readPublicWebsite(lead.website);
+  } catch (error) {
+    // Missing research yields a lighter email; it must never become fake evidence.
+    check(
+      await admin()
+        .from("leads")
+        .update({
+          status: "READY_FOR_OUTREACH",
+          verified_facts: {},
+          opening_hours: null,
+          personalization_fact: null,
+          website_summary:
+            "Site indisponibil. Fără observații publice verificate.",
+          enriched_at: new Date().toISOString(),
+        })
+        .eq("organization_id", job.organization_id)
+        .eq("id", lead.id),
+    );
+    await log(job.organization_id, "lead_research_unavailable", lead.id, {
+      reason: safeError(error),
+    });
+    return;
+  }
+  await enrichFromText(job, lead, text);
 }
-async function draft(job: Job, lead: Row<"leads">, includePayload = false) {
+async function draft(
+  job: Job,
+  lead: Row<"leads">,
+  includePayload = false,
+  forceRegenerate = false,
+) {
   if (lead.do_not_contact) return;
   const p = payloadSchema.parse(job.payload);
   const campaign = await campaignFor(
@@ -381,6 +411,16 @@ async function draft(job: Job, lead: Row<"leads">, includePayload = false) {
   );
   const step = p.step || 0;
   const variant = p.variant;
+  const key = `outreach:${lead.id}:${campaign?.id || "manual"}:${step}${variant ? `:${variant}` : ""}`;
+  const previous = check(
+    await admin()
+      .from("messages")
+      .select("id,status,metadata,subject,body,model,approved_by,sent_at")
+      .eq("organization_id", job.organization_id)
+      .eq("idempotency_key", key)
+      .maybeSingle(),
+  );
+  if (reuseOutreachDraft(previous, forceRegenerate)) return;
   if (
     step > 0 &&
     check(
@@ -393,206 +433,133 @@ async function draft(job: Job, lead: Row<"leads">, includePayload = false) {
     ).length
   )
     return;
-  const docs = await knowledge(job.organization_id);
-  const conv = await conversation(job.organization_id, lead.id);
-  const generated = await generation(
-    job.organization_id,
-    lead,
-    "outreach",
-    draftSchema,
-    JSON.stringify({
-      task: outreachInstructions(lead.company_name, optOutLine),
-      variant: variant || "standard",
-      verified_summary: lead.website_summary,
-      verified_relevant_fact: verifiedOutreachFact(lead),
-      fact_used_rule:
-        "Întoarce fact_used=null dacă nu folosești verified_relevant_fact. Dacă îl folosești, fact_used trebuie să fie identic cu verified_relevant_fact.",
-      company: lead.company_name,
-      step,
-      campaign,
-      knowledge: docs,
-    }),
-    includePayload,
-  );
-  const { value, model } = generated;
-  validateReviewDraft(value, lead);
-  const key = `outreach:${lead.id}:${campaign?.id || "manual"}:${step}${variant ? `:${variant}` : ""}`;
-  const existingVariant = variant
-    ? check(
-        await admin()
-          .from("messages")
-          .select("metadata,subject")
-          .eq("organization_id", job.organization_id)
-          .eq("idempotency_key", key)
-          .maybeSingle(),
-      )
-    : null;
-  const existingMetadata =
-    existingVariant?.metadata &&
-    typeof existingVariant.metadata === "object" &&
-    !Array.isArray(existingVariant.metadata)
-      ? existingVariant.metadata
-      : {};
-  check(
+  const contact = check(
     await admin()
-      .from("messages")
-      .upsert(
-        {
-          organization_id: job.organization_id,
-          lead_id: lead.id,
-          conversation_id: conv.id,
-          campaign_id: campaign?.id,
-          direction: "outbound",
-          subject: value.subject,
-          body: value.body,
-          model,
-          knowledge_document_ids: value.knowledge_ids.filter((id) =>
-            docs.some((d) => d.id === id),
-          ),
-          idempotency_key: key,
-          follow_up_number: variant ? null : step,
-          status: campaign?.mode === "automatic" ? "queued" : "draft",
-          approved_by: variant ? null : undefined,
-          approved_at: variant ? null : undefined,
-          metadata: {
-            ...existingMetadata,
-            ...(variant ? { outreach_variant: variant } : {}),
-            provider: generated.provider,
-            thinking_level: generated.thinkingLevel,
-            token_usage: generated.usage,
-            estimated_cost_usd: generated.estimatedCostUsd,
-            dry_run_review: !!variant,
-            copy_version: outreachCopyVersion,
-            reply_to: "contact@voxatech.ro",
-            primary_style: variant === "B",
-            fact_used: value.fact_used,
-            review_state: variant ? "draft" : undefined,
-            last_test_sent_at: variant ? null : undefined,
-            last_test_provider_id: variant ? null : undefined,
-          },
-        },
-        {
-          onConflict: "organization_id,idempotency_key",
-          ignoreDuplicates: !variant,
-        },
-      ),
-  );
-  return generated;
-}
-async function draftPair(job: Job, lead: Row<"leads">, includePayload = false) {
-  if (lead.do_not_contact) return;
-  const p = payloadSchema.parse(job.payload);
-  const campaign = await campaignFor(
-    job.organization_id,
-    lead.id,
-    p.campaign_id,
-  );
-  const docs = await knowledge(job.organization_id);
+      .from("lead_contacts")
+      .select("name,position")
+      .eq("organization_id", job.organization_id)
+      .eq("lead_id", lead.id)
+      .order("is_primary", { ascending: false })
+      .limit(1),
+  )[0];
+  const context = buildLeadContext(lead, contact);
   const conv = await conversation(job.organization_id, lead.id);
-  const request = {
-    task:
-      outreachInstructions(lead.company_name, optOutLine) +
-      " Generează variant_a și variant_b cu același șablon și mici diferențe de exprimare.",
-    verified_summary: lead.website_summary,
-    verified_relevant_fact: verifiedOutreachFact(lead),
-    fact_used_rule:
-      "Pentru fiecare variantă, fact_used este null dacă nu folosești verified_relevant_fact. Dacă îl folosești, valoarea trebuie să fie identică cu verified_relevant_fact. În corpul emailului parafrazează faptul natural și nu folosi expresia «programul public verificat».",
-    company: lead.company_name,
-    contact_name: lead.contact_name,
-    campaign,
-    knowledge: docs,
-  };
-  let generated = await generation(
-    job.organization_id,
-    lead,
-    "outreach",
-    draftPairSchema,
-    JSON.stringify(request),
-    includePayload,
-  );
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      validateReviewDraft(generated.value.variant_a, lead);
-      validateReviewDraft(generated.value.variant_b, lead);
-      break;
-    } catch (error) {
-      if (attempt === 2) throw error;
-      generated = await generation(
+  const generated = await generateOutreach({
+    context,
+    step,
+    variant,
+    generate: (prompt, attempt) =>
+      generation(
         job.organization_id,
         lead,
         "outreach",
-        draftPairSchema,
-        JSON.stringify({
-          ...request,
-          correction:
-            error instanceof Error
-              ? `Rezultatul anterior a fost respins: ${error.message} Rescrie ambele variante și respectă toate regulile.`
-              : "Rescrie ambele variante și respectă toate regulile.",
-        }),
+        outreachOutputSchema,
+        prompt,
         includePayload,
-      );
-    }
-  }
-  const halves = (value: number) => [
-    Math.floor(value / 2),
-    Math.ceil(value / 2),
-  ];
-  const [inputA, inputB] = halves(generated.usage.input_tokens);
-  const [outputA, outputB] = halves(generated.usage.output_tokens);
-  const [thinkingA, thinkingB] = halves(generated.usage.thinking_tokens);
-  const [cachedA, cachedB] = halves(generated.usage.cached_tokens);
-  const [totalA, totalB] = halves(generated.usage.total_tokens);
-  for (const [index, [variant, value]] of (
-    [
-      ["A", generated.value.variant_a],
-      ["B", generated.value.variant_b],
-    ] as const
-  ).entries()) {
-    const usage = {
-      input_tokens: index === 0 ? inputA : inputB,
-      output_tokens: index === 0 ? outputA : outputB,
-      thinking_tokens: index === 0 ? thinkingA : thinkingB,
-      cached_tokens: index === 0 ? cachedA : cachedB,
-      total_tokens: index === 0 ? totalA : totalB,
-    };
+        attempt === 0 ? "minimal" : "low",
+      ),
+    onRejected: (reasons, attempt) =>
+      log(job.organization_id, "outreach_quality_rejected", lead.id, {
+        reasons,
+        attempt,
+      }),
+  });
+  const { value, model } = generated;
+  const existingMetadata =
+    previous?.metadata &&
+    typeof previous.metadata === "object" &&
+    !Array.isArray(previous.metadata)
+      ? previous.metadata
+      : {};
+  const changes = {
+    organization_id: job.organization_id,
+    lead_id: lead.id,
+    conversation_id: conv.id,
+    campaign_id: campaign?.id,
+    direction: "outbound",
+    subject: value.subject,
+    body: value.body,
+    model,
+    knowledge_document_ids: value.knowledge_ids,
+    idempotency_key: key,
+    follow_up_number: variant ? null : step,
+    status:
+      variant || previous?.status === "draft"
+        ? "draft"
+        : campaign?.mode === "automatic"
+          ? "queued"
+          : "draft",
+    approved_by: variant ? null : undefined,
+    approved_at: variant ? null : undefined,
+    metadata: {
+      ...existingMetadata,
+      ...(previous
+        ? {
+            prior_copy: {
+              subject: previous.subject,
+              body: previous.body,
+              model: previous.model,
+              copy_version: existingMetadata.copy_version || null,
+            },
+          }
+        : {}),
+      ...(variant ? { outreach_variant: variant } : {}),
+      provider: generated.provider,
+      thinking_level: generated.thinkingLevel,
+      token_usage: generated.usage,
+      estimated_cost_usd: generated.estimatedCostUsd,
+      dry_run_review: !!variant,
+      copy_version: outreachCopyVersion,
+      reply_to: "contact@voxatech.ro",
+      primary_style: variant === "B",
+      fact_used: value.fact_used,
+      selected_offer: value.selected_offer,
+      personalization_reason: value.personalization_reason,
+      automatic_unsubscribe: true,
+      review_state: variant ? "draft" : undefined,
+      last_test_sent_at: variant ? null : undefined,
+      last_test_provider_id: variant ? null : undefined,
+    },
+  } as const;
+  if (previous && !variant) {
+    // Upgrade an old unsent draft once; never overwrite an approval or send
+    // that raced with generation. Preserve the old copy for review/restore.
     check(
       await admin()
         .from("messages")
-        .upsert(
-          {
-            organization_id: job.organization_id,
-            lead_id: lead.id,
-            conversation_id: conv.id,
-            campaign_id: campaign?.id,
-            direction: "outbound",
-            subject: value.subject,
-            body: value.body,
-            model: generated.model,
-            knowledge_document_ids: value.knowledge_ids.filter((id) =>
-              docs.some((doc) => doc.id === id),
-            ),
-            idempotency_key: `outreach:${lead.id}:${campaign?.id || "manual"}:0:${variant}`,
-            follow_up_number: null,
-            status: "draft",
-            metadata: {
-              outreach_variant: variant,
-              provider: generated.provider,
-              thinking_level: generated.thinkingLevel,
-              token_usage: usage,
-              estimated_cost_usd: generated.estimatedCostUsd / 2,
-              dry_run_review: true,
-              copy_version: outreachCopyVersion,
-              primary_style: variant === "B",
-              fact_used: value.fact_used,
-            },
-          },
-          {
-            onConflict: "organization_id,idempotency_key",
-          },
-        ),
+        .update(changes)
+        .eq("organization_id", job.organization_id)
+        .eq("id", previous.id)
+        .eq("status", "draft")
+        .is("approved_by", null)
+        .is("sent_at", null),
+    );
+  } else {
+    check(
+      await admin()
+        .from("messages")
+        .upsert(changes, {
+          onConflict: "organization_id,idempotency_key",
+          ignoreDuplicates: !variant,
+        }),
     );
   }
   return generated;
+}
+async function draftPair(job: Job, lead: Row<"leads">, includePayload = false) {
+  // Each variant uses the same context, validation and bounded retry pipeline.
+  const payload = payloadSchema.parse(job.payload);
+  const variant_a = await draft(
+    { ...job, payload: { ...payload, variant: "A" } },
+    lead,
+    includePayload,
+  );
+  const variant_b = await draft(
+    { ...job, payload: { ...payload, variant: "B" } },
+    lead,
+    includePayload,
+  );
+  return { variant_a, variant_b };
 }
 async function incoming(job: Job, lead: Row<"leads">) {
   const p = payloadSchema.parse(job.payload);
@@ -606,6 +573,17 @@ async function incoming(job: Job, lead: Row<"leads">) {
       .single(),
   );
   if (lead.do_not_contact) return;
+  if (
+    check(
+      await admin()
+        .from("messages")
+        .select("id")
+        .eq("organization_id", job.organization_id)
+        .eq("idempotency_key", `reply:${inbound.id}`)
+        .maybeSingle(),
+    )
+  )
+    return;
   if (humanRequired(inbound.body)) {
     await attention(
       job.organization_id,
@@ -640,18 +618,22 @@ async function incoming(job: Job, lead: Row<"leads">) {
     );
     return;
   }
-  const docs = await knowledge(job.organization_id);
-  const classification = await generation(
-    job.organization_id,
-    lead,
-    "classification",
-    replyClassificationSchema,
-    JSON.stringify({
-      task: "Clasifică mesajul și rezumă-l pentru CRM. is_hot_lead=true numai dacă există interes comercial explicit pentru Voxa: cere demo, test, ofertă/preț pentru implementare sau o discuție concretă. Un răspuns politicos, întrebare generică, mesaj automat, refuz ori dezabonare nu este hot. hot_reason explică scurt dovada sau este null. Pentru contracte, GDPR, reduceri, integrări personalizate ori întrebări tehnice complexe setează requires_human. Nu redacta încă un răspuns.",
-      message: inbound.body,
-      lead_summary: lead.website_summary,
-    }),
+  const cachedAnalysis = replyClassificationSchema.safeParse(
+    messageMetadata(inbound).reply_analysis,
   );
+  const classification = cachedAnalysis.success
+    ? { value: cachedAnalysis.data, model: inbound.model }
+    : await generation(
+        job.organization_id,
+        lead,
+        "classification",
+        replyClassificationSchema,
+        JSON.stringify({
+          task: "Clasifică mesajul și rezumă-l pentru CRM. is_hot_lead=true numai dacă există interes comercial explicit pentru Voxa: cere demo, test, ofertă/preț pentru implementare sau o discuție concretă. Un răspuns politicos, întrebare generică, mesaj automat, refuz ori dezabonare nu este hot. hot_reason explică scurt dovada sau este null. Pentru contracte, GDPR, reduceri, integrări personalizate ori întrebări tehnice complexe setează requires_human. Nu redacta încă un răspuns.",
+          message: inbound.body,
+          lead_summary: lead.website_summary,
+        }),
+      );
   check(
     await admin()
       .from("messages")
@@ -675,6 +657,7 @@ async function incoming(job: Job, lead: Row<"leads">) {
             ].includes(classification.value.classification),
           classification_confidence: classification.value.confidence,
           hot_reason: classification.value.hot_reason,
+          reply_analysis: classification.value,
         },
       })
       .eq("id", inbound.id),
@@ -707,6 +690,7 @@ async function incoming(job: Job, lead: Row<"leads">) {
     await attention(job.organization_id, lead, classification.value.summary);
     return;
   }
+  const docs = await knowledge(job.organization_id);
   const response = await generation(
     job.organization_id,
     lead,
@@ -1633,7 +1617,7 @@ export async function runAiEvaluationBatch(
       primary_variant: "B",
       copy_version: outreachCopyVersion,
       provider: "google_gemini",
-      model: process.env.DEFAULT_AUTOMATION_MODEL || "gemini-3.8-flash",
+      model: process.env.DEFAULT_AUTOMATION_MODEL || "gemini-3.1-flash-lite",
       thinking_level: "low",
     };
     await log(
@@ -1641,7 +1625,7 @@ export async function runAiEvaluationBatch(
       "ai_batch_evaluation",
       lead.id,
       details,
-      process.env.DEFAULT_AUTOMATION_MODEL || "gemini-3.8-flash",
+      process.env.DEFAULT_AUTOMATION_MODEL || "gemini-3.1-flash-lite",
       actorId,
     );
     results.push({
@@ -1720,13 +1704,14 @@ export async function regenerateReviewDraft(
     } as unknown as Job,
     lead,
     true,
+    true,
   );
   await log(
     organizationId,
     "message_regenerate",
     lead.id,
     { message_id: message.id, campaign_id: message.campaign_id },
-    process.env.DEFAULT_AUTOMATION_MODEL || "gemini-3.8-flash",
+    process.env.DEFAULT_AUTOMATION_MODEL || "gemini-3.1-flash-lite",
     actorId,
   );
   return check(
@@ -1765,8 +1750,10 @@ export async function runControlledAiTest(
     throw new Error(
       "Google Gemini neconfigurat. Adaugă GEMINI_API_KEY în .env.local.",
     );
-  if (process.env.DEFAULT_AUTOMATION_MODEL !== "gemini-3.8-flash")
-    throw new Error("Testul cere DEFAULT_AUTOMATION_MODEL=gemini-3.8-flash.");
+  if (process.env.DEFAULT_AUTOMATION_MODEL !== "gemini-3.1-flash-lite")
+    throw new Error(
+      "Testul cere DEFAULT_AUTOMATION_MODEL=gemini-3.1-flash-lite.",
+    );
   if (process.env.AI_PROVIDER !== "google_gemini")
     throw new Error("Testul cere AI_PROVIDER=google_gemini.");
 
@@ -1952,6 +1939,29 @@ export async function runWorker(organization?: string) {
         throw new Error("Lease expired; result needs reconciliation.");
       results.push({ id: job.id, ok: true });
     } catch (error) {
+      if (error instanceof OutreachQualityError && job.lead_id) {
+        const target = check(
+          await admin()
+            .from("leads")
+            .select("*")
+            .eq("id", job.lead_id)
+            .eq("organization_id", job.organization_id)
+            .single(),
+        );
+        await attention(
+          job.organization_id,
+          target,
+          `Ciorna necesită revizuire după două încercări: ${error.message}`,
+        );
+        check(
+          await admin().rpc("finish_automation_job", {
+            job_id: job.id,
+            token: job.lock_token!,
+          }),
+        );
+        results.push({ id: job.id, ok: false, review_required: true });
+        continue;
+      }
       if (error instanceof DeferredSend) {
         check(
           await admin().rpc("defer_automation_job", {

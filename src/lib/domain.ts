@@ -145,10 +145,16 @@ export function sendingWindow(date: Date, start = "08:00", end = "12:00") {
   const p = bucharest(date);
   return p.weekday && p.time >= start && p.time < end;
 }
-export function aiThinkingLevel(workflow: string): "low" | "medium" {
+export function aiThinkingLevel(
+  workflow: string,
+): "minimal" | "low" | "medium" {
   return ["inbound_reply", "objection_reply", "demo"].includes(workflow)
     ? "medium"
-    : "low";
+    : ["research", "outreach", "classification", "crm_summary"].includes(
+          workflow,
+        )
+      ? "minimal"
+      : "low";
 }
 export const money = (n: number, currency = "RON") =>
   new Intl.NumberFormat("ro-RO", {

@@ -122,6 +122,7 @@ async function campaignLaunchReadiness(
     drafts: recommended.map((message) => ({
       approved: message.status === "approved",
       body: message.body,
+      transportUnsubscribe: true, // sendOrganizationEmail always appends the signed unsubscribe URL.
     })),
     dailyCap: campaign.daily_cap,
     confirmation,

@@ -608,12 +608,12 @@ export function GmailAutopilotPanel({ data, manager, refresh }: Props) {
         title="Pornește Autopilot Gmail"
       >
         <p>
-          Acest mesaj va fi personalizat și trimis automat leadurilor eligibile.
-          Limitele zilnice includ și răspunsurile trimise de asistent. Poți pune
-          Autopilot în pauză oricând.
+          Fiecare lead primește un email nou, cu o singură ofertă aleasă din
+          context. Limitele zilnice includ și răspunsurile trimise de asistent.
+          Poți pune Autopilot în pauză oricând.
         </p>
         <div className="gmail-approved-template">
-          <strong>Mesajul de pornire</strong>
+          <strong>Cum sunt scrise emailurile</strong>
           <p>{approvedOutreachTemplate}</p>
         </div>
         <p className="helper-text">

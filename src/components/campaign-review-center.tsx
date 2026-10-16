@@ -169,7 +169,7 @@ export function CampaignReviewCenter({
   const copyCompliant =
     rows.length > 0 &&
     rows.every(
-      (row) => !!row.message && hasIdentityAndOptOut(row.message.body),
+      (row) => !!row.message && hasIdentityAndOptOut(row.message.body, true),
     );
   const dailyLimitValid =
     !!campaign && campaign.daily_cap > 0 && campaign.daily_cap <= 10;
@@ -187,7 +187,7 @@ export function CampaignReviewCenter({
     ["Toți destinatarii au email valid, fără placeholder", recipientsValid],
     ["Toate Variantele B sunt aprobate", approvedComplete],
     [
-      "Identitatea Voxa, voxatech.ro și linia de opt-out sunt prezente",
+      "Identitate Voxa și dezabonare adăugată automat la livrare",
       copyCompliant,
     ],
     ["Limita zilnică este maximum 10", dailyLimitValid],

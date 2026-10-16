@@ -29,20 +29,28 @@ export function validProspectEmail(value: string | null | undefined) {
   );
 }
 
-export function hasIdentityAndOptOut(body: string) {
+export function hasIdentityAndOptOut(
+  body: string,
+  transportUnsubscribe = false,
+) {
   return (
     (/VoxaTech/u.test(body) ||
       (/\bVoxa\b/u.test(body) && /voxatech\.ro/u.test(body))) &&
-    /(nu (?:vă|te) mai contactez|nu mai revenim|dezabon|opr(?:im|iți) mesajele)/iu.test(
-      body,
-    )
+    (transportUnsubscribe ||
+      /(nu (?:vă|te) mai contactez|nu mai revenim|dezabon|opr(?:im|iți) mesajele)/iu.test(
+        body,
+      ))
   );
 }
 
 export type LaunchReadinessInput = {
   senderVerified: boolean;
   recipients: Array<{ email: string | null }>;
-  drafts: Array<{ approved: boolean; body: string }>;
+  drafts: Array<{
+    approved: boolean;
+    body: string;
+    transportUnsubscribe?: boolean;
+  }>;
   dailyCap: number;
   confirmation?: string;
   liveMode: boolean;
@@ -57,7 +65,9 @@ export function evaluateLaunchReadiness(input: LaunchReadinessInput) {
     input.drafts.every((draft) => draft.approved);
   const compliantCopy =
     input.drafts.length === input.recipients.length &&
-    input.drafts.every((draft) => hasIdentityAndOptOut(draft.body));
+    input.drafts.every((draft) =>
+      hasIdentityAndOptOut(draft.body, draft.transportUnsubscribe),
+    );
   const dailyLimitValid = input.dailyCap > 0 && input.dailyCap <= 10;
   const manuallyConfirmed = input.confirmation === launchConfirmation;
   return {

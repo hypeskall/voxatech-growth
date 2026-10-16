@@ -37,7 +37,7 @@ test("Gemini thinking levels separate volume work from conversations", () => {
     "classification",
     "crm_summary",
   ])
-    assert.equal(aiThinkingLevel(workflow), "low");
+    assert.equal(aiThinkingLevel(workflow), "minimal");
   for (const workflow of ["inbound_reply", "objection_reply", "demo"])
     assert.equal(aiThinkingLevel(workflow), "medium");
   assert.equal(humanRequired("Putem discuta un contract?"), true);
