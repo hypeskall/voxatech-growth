@@ -22,7 +22,7 @@ export default async function Page({
       <div className="brand">
         <BrandMark />
         <div>
-          voxa<small>TECH</small>
+          Voxa
         </div>
       </div>
       <h1>Hai să pregătim recepția ta AI.</h1>

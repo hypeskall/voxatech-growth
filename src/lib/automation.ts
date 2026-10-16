@@ -1,13 +1,19 @@
 import "server-only";
 import { z } from "zod";
-import { parseBuffer } from "music-metadata";
 class DeferredSend extends Error {}
 import { admin, check, enqueue, log, appUrl, safeError, type Job } from "./db";
 import { getAIProvider, safetyPrompt, type AIProviderId } from "./providers/ai";
-import { email } from "./providers/email";
-import { ElevenLabsProvider, ttsConfigured } from "./providers/tts";
+import { sendOrganizationEmail } from "./providers/email";
+import { GmailDeferredError, GmailStoppedError } from "./gmail-api";
+import { syncGmail } from "./gmail-sync";
 import { readPublicWebsite } from "./website";
 import { aiThinkingLevel, bucharest, humanRequired, type Row } from "./domain";
+import {
+  outreachCopyVersion,
+  verifiedOutreachFact,
+  outreachInstructions,
+  validateOutreach,
+} from "./outreach-template";
 import { optOutLine } from "./launch";
 import type { Json } from "./supabase/database.types";
 const evidence = z.object({
@@ -36,75 +42,23 @@ const draftPairSchema = z.object({
   variant_a: draftSchema,
   variant_b: draftSchema,
 });
-const outreachCopyVersion = "pain-first-v3";
-
-function verifiedOutreachFact(lead: Row<"leads">) {
-  const hours = lead.opening_hours;
-  const text =
-    hours && typeof hours === "object" && !Array.isArray(hours)
-      ? typeof hours.text === "string"
-        ? hours.text.trim()
-        : ""
-      : typeof hours === "string"
-        ? hours.trim()
-        : "";
-  if (!text) return null;
-  if (/s[âa]mb[ăa]t[ăa].*închis.*duminic[ăa].*închis/iu.test(text))
-    return "Programul public verificat arată că clinica este închisă sâmbăta și duminica.";
-  if (text.length <= 90)
-    return `Programul public verificat este: ${text}.`;
-  return null;
-}
 
 function validateReviewDraft(
   draft: z.infer<typeof draftSchema>,
   lead: Row<"leads">,
 ) {
-  const words = draft.body.trim().split(/\s+/u).filter(Boolean).length;
-  if (words < 70 || words > 100)
-    throw new Error(`Ciorna trebuie să aibă 70–100 de cuvinte; are ${words}.`);
-  if (!lead.contact_name && !draft.body.trimStart().startsWith("Bună ziua,"))
-    throw new Error("Ciorna fără persoană de contact trebuie să înceapă cu „Bună ziua,”.");
-  const opening = draft.body
-    .trimStart()
-    .replace(/^Bună ziua,\s*/u, "")
-    .split(/\s+/u)
-    .slice(0, 28)
-    .join(" ");
-  if (
-    !/apel(?:ul|uri|urile)?/iu.test(opening) ||
-    !/(pierdut|pierdute|nepreluat|nepreluate|fără răspuns)/iu.test(opening)
-  )
-    throw new Error("Ciorna trebuie să înceapă cu problema apelurilor pierdute.");
-  const cta = `V-ar fi util să vă trimit o simulare scurtă pentru ${lead.company_name}?`;
-  if (!draft.body.includes(cta)) throw new Error("CTA-ul obligatoriu lipsește.");
-  if ((draft.body.match(/VoxaTech/g) || []).length !== 1)
-    throw new Error("VoxaTech trebuie menționat exact o dată.");
+  validateOutreach(draft.body, lead.company_name);
   if (!draft.body.includes(optOutLine))
-    throw new Error("Ciorna trebuie să includă linia simplă de oprire a contactării.");
-  if (/dedicat clinicilor din România/i.test(draft.body))
-    throw new Error("Ciorna conține formulare generică interzisă.");
+    throw new Error("Linia opt-out lipsește.");
   if (
-    /duc direct|inevitabil|determină adesea|se pierd rapid către|pacienți noi care nu mai revin/iu.test(
-      draft.body,
-    )
+    draft.fact_used !== null &&
+    draft.fact_used !== verifiedOutreachFact(lead)
   )
-    throw new Error("Ciorna prezintă un efect neverificat drept certitudine.");
-  const relevantFact = verifiedOutreachFact(lead);
+    throw new Error("Fapt neverificat în ciornă.");
   if (
-    draft.fact_used === null &&
-    relevantFact &&
-    /(program|weekend|s[âa]mb[ăa]t[ăa]|duminic[ăa])/iu.test(draft.body)
+    draft.subject !== `30 de zile gratuite cu Voxa pentru ${lead.company_name}`
   )
-    draft.fact_used = relevantFact;
-  if (draft.fact_used !== null && draft.fact_used !== relevantFact)
-    throw new Error("Ciorna declară un fapt care nu corespunde datelor verificate.");
-  const subjects = [
-    `O idee pentru recepția ${lead.company_name}`,
-    `Apeluri nepreluate la ${lead.company_name}`,
-  ];
-  if (!subjects.includes(draft.subject))
-    throw new Error("Subiectul nu respectă unul dintre modelele aprobate.");
+    throw new Error("Subiectul aprobat lipsește.");
 }
 const replyClassificationSchema = z.object({
   classification: z.enum([
@@ -117,20 +71,16 @@ const replyClassificationSchema = z.object({
     "wrong_contact",
     "human_required",
   ]),
-  confidence: z.number(),
+  confidence: z.number().min(0).max(1),
   requires_human: z.boolean(),
   summary: z.string(),
+  is_hot_lead: z.boolean(),
+  hot_reason: z.string().nullable(),
 });
 const replyDraftSchema = z.object({
   subject: z.string(),
   body: z.string(),
   knowledge_ids: z.array(z.string()),
-});
-const scriptSchema = z.object({
-  turns: z
-    .array(z.object({ role: z.enum(["Pacient", "Voxa"]), text: z.string() }))
-    .min(4)
-    .max(12),
 });
 const payloadSchema = z.object({
   message_id: z.uuid().optional(),
@@ -369,7 +319,10 @@ async function enrichFromText(
     /stomat|dentar|dermato|estetic|orl|oftalmo|medical/i.test(facts.niche || "")
   )
     reasons.push({ reason: "Specialitate potrivită", points: 10 });
-  const score = Math.min(90, reasons.reduce((n, r) => n + r.points, 0));
+  const score = Math.min(
+    90,
+    reasons.reduce((n, r) => n + r.points, 0),
+  );
   const summaryHours = (facts.hours || "necunoscut").replace(/[.\s]+$/, "");
   check(
     await admin()
@@ -448,10 +401,7 @@ async function draft(job: Job, lead: Row<"leads">, includePayload = false) {
     "outreach",
     draftSchema,
     JSON.stringify({
-      task:
-        variant === "B"
-          ? `Scrie varianta B, stilul principal. Are 70–100 de cuvinte și începe după salut cu durerea: apeluri pierdute când recepția este ocupată sau clinica este închisă. Descrie impactul doar ca posibilitate sau risc, niciodată ca rezultat cert. Menționează VoxaTech exact o dată, într-o singură propoziție concisă despre produs. Folosește un fapt al clinicii numai dacă susține direct această problemă și este verificat. Nu folosi adresa, anul înființării, locația sau fapte decorative. Nu te adresa unei persoane pe nume fără contact_name verificat. În lipsa lui începe exact cu „Bună ziua,”. Înainte de CTA include exact linia „${optOutLine}”. Încheie exact cu „V-ar fi util să vă trimit o simulare scurtă pentru ${lead.company_name}?”. Subiectul este exact unul dintre: „O idee pentru recepția ${lead.company_name}” sau „Apeluri nepreluate la ${lead.company_name}”.`
-          : `Scrie varianta A în română, elegantă și concisă, 70–100 de cuvinte. Începe după salut cu apelurile pierdute când recepția este ocupată sau clinica este închisă, dar păstrează un ton calm. Menționează VoxaTech exact o dată într-o propoziție concisă. Folosește numai un fapt verificat care susține direct mesajul; nu folosi adresa, anul înființării, locația sau fapte decorative. Fără contact_name verificat începe exact cu „Bună ziua,”. Înainte de CTA include exact linia „${optOutLine}”. Încheie exact cu „V-ar fi util să vă trimit o simulare scurtă pentru ${lead.company_name}?”. Subiectul este exact unul dintre: „O idee pentru recepția ${lead.company_name}” sau „Apeluri nepreluate la ${lead.company_name}”.`,
+      task: outreachInstructions(lead.company_name, optOutLine),
       variant: variant || "standard",
       verified_summary: lead.website_summary,
       verified_relevant_fact: verifiedOutreachFact(lead),
@@ -465,12 +415,13 @@ async function draft(job: Job, lead: Row<"leads">, includePayload = false) {
     includePayload,
   );
   const { value, model } = generated;
+  validateReviewDraft(value, lead);
   const key = `outreach:${lead.id}:${campaign?.id || "manual"}:${step}${variant ? `:${variant}` : ""}`;
   const existingVariant = variant
     ? check(
         await admin()
           .from("messages")
-          .select("metadata")
+          .select("metadata,subject")
           .eq("organization_id", job.organization_id)
           .eq("idempotency_key", key)
           .maybeSingle(),
@@ -511,7 +462,8 @@ async function draft(job: Job, lead: Row<"leads">, includePayload = false) {
             token_usage: generated.usage,
             estimated_cost_usd: generated.estimatedCostUsd,
             dry_run_review: !!variant,
-            copy_version: variant ? outreachCopyVersion : undefined,
+            copy_version: outreachCopyVersion,
+            reply_to: "contact@voxatech.ro",
             primary_style: variant === "B",
             fact_used: value.fact_used,
             review_state: variant ? "draft" : undefined,
@@ -527,11 +479,7 @@ async function draft(job: Job, lead: Row<"leads">, includePayload = false) {
   );
   return generated;
 }
-async function draftPair(
-  job: Job,
-  lead: Row<"leads">,
-  includePayload = false,
-) {
+async function draftPair(job: Job, lead: Row<"leads">, includePayload = false) {
   if (lead.do_not_contact) return;
   const p = payloadSchema.parse(job.payload);
   const campaign = await campaignFor(
@@ -542,15 +490,17 @@ async function draftPair(
   const docs = await knowledge(job.organization_id);
   const conv = await conversation(job.organization_id, lead.id);
   const request = {
-      task: `Scrie două emailuri inițiale distincte în română, exclusiv pentru revizuire internă. Fiecare are 70–100 de cuvinte. După salut, ambele încep cu durerea: apeluri pierdute când recepția este ocupată sau clinica este închisă. Varianta B este stilul principal și are un hook mai ferm, fără alarmism; varianta A este mai elegantă și calmă. Descrie impactul numai ca posibilitate sau risc; nu afirma drept certitudine că pacientul pleacă, nu revine ori alege altă clinică. Menționează VoxaTech exact o dată în fiecare variantă, într-o singură propoziție concisă despre produs. Folosește un fapt al clinicii numai când susține direct mesajul și este verificat. Nu menționa adresa, anul înființării, locația sau fapte fără legătură. Nu te adresa unui medic sau unei persoane pe nume decât dacă contact_name este furnizat și verificat. Altfel începe exact cu „Bună ziua,”. Înainte de CTA, fiecare variantă include exact linia „${optOutLine}”. Fiecare variantă se încheie exact cu „V-ar fi util să vă trimit o simulare scurtă pentru ${lead.company_name}?”. Fiecare subiect este exact unul dintre: „O idee pentru recepția ${lead.company_name}” sau „Apeluri nepreluate la ${lead.company_name}”. Elimină expresia „dedicat clinicilor din România” și listele lungi de funcții.`,
-      verified_summary: lead.website_summary,
-      verified_relevant_fact: verifiedOutreachFact(lead),
-      fact_used_rule:
-        "Pentru fiecare variantă, fact_used este null dacă nu folosești verified_relevant_fact. Dacă îl folosești sau menționezi programul clinicii, valoarea trebuie să fie identică cu verified_relevant_fact. În corpul emailului parafrazează faptul natural și nu folosi expresia «programul public verificat».",
-      company: lead.company_name,
-      contact_name: lead.contact_name,
-      campaign,
-      knowledge: docs,
+    task:
+      outreachInstructions(lead.company_name, optOutLine) +
+      " Generează variant_a și variant_b cu același șablon și mici diferențe de exprimare.",
+    verified_summary: lead.website_summary,
+    verified_relevant_fact: verifiedOutreachFact(lead),
+    fact_used_rule:
+      "Pentru fiecare variantă, fact_used este null dacă nu folosești verified_relevant_fact. Dacă îl folosești, valoarea trebuie să fie identică cu verified_relevant_fact. În corpul emailului parafrazează faptul natural și nu folosi expresia «programul public verificat».",
+    company: lead.company_name,
+    contact_name: lead.contact_name,
+    campaign,
+    knowledge: docs,
   };
   let generated = await generation(
     job.organization_id,
@@ -583,7 +533,10 @@ async function draftPair(
       );
     }
   }
-  const halves = (value: number) => [Math.floor(value / 2), Math.ceil(value / 2)];
+  const halves = (value: number) => [
+    Math.floor(value / 2),
+    Math.ceil(value / 2),
+  ];
   const [inputA, inputB] = halves(generated.usage.input_tokens);
   const [outputA, outputB] = halves(generated.usage.output_tokens);
   const [thinkingA, thinkingB] = halves(generated.usage.thinking_tokens);
@@ -694,7 +647,7 @@ async function incoming(job: Job, lead: Row<"leads">) {
     "classification",
     replyClassificationSchema,
     JSON.stringify({
-      task: "Clasifică mesajul și rezumă-l pentru CRM. Pentru contracte, GDPR, reduceri, integrări personalizate ori întrebări tehnice complexe setează requires_human. Nu redacta încă un răspuns.",
+      task: "Clasifică mesajul și rezumă-l pentru CRM. is_hot_lead=true numai dacă există interes comercial explicit pentru Voxa: cere demo, test, ofertă/preț pentru implementare sau o discuție concretă. Un răspuns politicos, întrebare generică, mesaj automat, refuz ori dezabonare nu este hot. hot_reason explică scurt dovada sau este null. Pentru contracte, GDPR, reduceri, integrări personalizate ori întrebări tehnice complexe setează requires_human. Nu redacta încă un răspuns.",
       message: inbound.body,
       lead_summary: lead.website_summary,
     }),
@@ -705,6 +658,24 @@ async function incoming(job: Job, lead: Row<"leads">) {
       .update({
         classification: classification.value.classification,
         model: classification.model,
+        metadata: {
+          ...(inbound.metadata &&
+          typeof inbound.metadata === "object" &&
+          !Array.isArray(inbound.metadata)
+            ? inbound.metadata
+            : {}),
+          is_hot_lead:
+            classification.value.is_hot_lead &&
+            classification.value.confidence >= 0.85 &&
+            ![
+              "refusal",
+              "unsubscribe",
+              "not_interested",
+              "wrong_contact",
+            ].includes(classification.value.classification),
+          classification_confidence: classification.value.confidence,
+          hot_reason: classification.value.hot_reason,
+        },
       })
       .eq("id", inbound.id),
   );
@@ -794,164 +765,7 @@ async function incoming(job: Job, lead: Row<"leads">) {
       })
       .eq("id", lead.id),
   );
-  if (classification.value.classification === "positive")
-    await enqueue(
-      job.organization_id,
-      "generate_requested_demos",
-      `positive-demo:${inbound.id}`,
-      lead.id,
-      { send: true },
-    );
-}
-async function demo(job: Job, lead: Row<"leads">) {
-  const started = Date.now();
-  const p = payloadSchema.parse(job.payload);
-  let record = check(
-    await admin()
-      .from("demos")
-      .select("*")
-      .eq("organization_id", job.organization_id)
-      .eq("idempotency_key", job.idempotency_key)
-      .maybeSingle(),
-  );
-  if (!record)
-    record = check(
-      await admin()
-        .from("demos")
-        .insert({
-          organization_id: job.organization_id,
-          lead_id: lead.id,
-          idempotency_key: job.idempotency_key,
-          expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
-        })
-        .select()
-        .single(),
-    );
-  if (!record.script) {
-    const { value, model } = await generation(
-      job.organization_id,
-      lead,
-      "demo",
-      scriptSchema,
-      JSON.stringify({
-        task: "Creează o simulare de apel în română de 35–60 secunde, între 85 și 130 de cuvinte, roluri Pacient și Voxa. Exemplu fictiv explicit. Folosește doar numele, serviciile și programul verificate. Fără date personale reale, programări confirmate sau prețuri inventate. Dacă programul ori serviciile lipsesc, cere clarificare și propune transfer la coleg. Include salut, cerere programare, clarificare, încheiere.",
-        company: lead.company_name,
-        services: lead.services,
-        hours: lead.opening_hours,
-      }),
-    );
-    const words = value.turns.reduce(
-      (n, t) => n + t.text.trim().split(/\s+/).length,
-      0,
-    );
-    if (words < 75 || words > 145)
-      throw new Error("Scenariul depășește durata permisă. Reîncercare.");
-    const path = `${job.organization_id}/${record.id}/script.json`;
-    check(
-      await admin()
-        .storage.from("voxa-demos")
-        .upload(path, JSON.stringify(value), {
-          contentType: "application/json",
-          upsert: true,
-        }),
-    );
-    record = check(
-      await admin()
-        .from("demos")
-        .update({
-          script: value,
-          model,
-          status: ttsConfigured()
-            ? "generating"
-            : "audio_awaiting_configuration",
-        })
-        .eq("id", record.id)
-        .select()
-        .single(),
-    );
-  }
-  if (ttsConfigured() && record.status !== "ready") {
-    const script = scriptSchema.parse(record.script);
-    const segments = z
-      .array(
-        z.object({
-          role: z.enum(["Pacient", "Voxa"]),
-          path: z.string(),
-          duration: z.number().optional(),
-        }),
-      )
-      .parse(record.audio_segments);
-    const provider = new ElevenLabsProvider();
-    for (let i = segments.length; i < script.turns.length; i++) {
-      if (Date.now() - started > 190000)
-        throw new Error("Generarea audio continuă la următoarea încercare.");
-      const turn = script.turns[i];
-      const bytes = await provider.speak(turn.text, turn.role);
-      const path = `${job.organization_id}/${record.id}/${i}-${turn.role}.mp3`;
-      check(
-        await admin()
-          .storage.from("voxa-demos")
-          .upload(path, bytes, { contentType: "audio/mpeg", upsert: true }),
-      );
-      const duration = (
-        await parseBuffer(bytes, { mimeType: "audio/mpeg" }, { duration: true })
-      ).format.duration;
-      if (!duration) throw new Error("Durata audio nu poate fi verificată.");
-      segments.push({ role: turn.role, path, duration });
-      check(
-        await admin()
-          .from("demos")
-          .update({ audio_segments: segments })
-          .eq("id", record.id),
-      );
-    }
-    const duration = Math.round(
-      segments.reduce((n, s) => n + (s.duration || 0), 0),
-    );
-    if (duration < 35 || duration > 60) {
-      check(
-        await admin()
-          .from("demos")
-          .update({ status: "failed" })
-          .eq("id", record.id),
-      );
-      throw new Error(
-        "Durata audio este în afara intervalului 35–60 secunde. Generează un demo nou.",
-      );
-    }
-    check(
-      await admin()
-        .from("demos")
-        .update({ status: "ready", duration_seconds: duration })
-        .eq("id", record.id),
-    );
-  }
-  if (p.send && !lead.do_not_contact) {
-    const conv = await conversation(job.organization_id, lead.id);
-    const campaign = await campaignFor(job.organization_id, lead.id);
-    check(
-      await admin()
-        .from("messages")
-        .upsert(
-          {
-            organization_id: job.organization_id,
-            lead_id: lead.id,
-            conversation_id: conv.id,
-            campaign_id: campaign?.id,
-            direction: "outbound",
-            subject: `Simulare VoxaTech pentru ${lead.company_name}`,
-            body: `Bună ziua!\n\nAm pregătit o simulare demonstrativă pentru ${lead.company_name}:\n${appUrl()}/demo/${record.share_token}\n\nScenariul este demonstrativ. Ne puteți spune dacă ar fi util pentru recepția dumneavoastră?`,
-            idempotency_key: `demo-send:${record.id}`,
-            status: campaign?.mode === "automatic" ? "queued" : "draft",
-            metadata: { demo_id: record.id },
-          },
-          {
-            onConflict: "organization_id,idempotency_key",
-            ignoreDuplicates: true,
-          },
-        ),
-    );
-  }
+  // Interested prospects remain in Inbox for a human conversation.
 }
 function messageMetadata(message: Row<"messages">) {
   return message.metadata &&
@@ -1038,8 +852,6 @@ async function send(job: Job) {
     return;
   }
   const resendFrom = process.env.RESEND_FROM_EMAIL || process.env.EMAIL_FROM;
-  if (!process.env.RESEND_API_KEY || !resendFrom)
-    throw new Error("Resend neconfigurat.");
   const reserved = check(
     await admin().rpc("reserve_outbound_message", { message_id: p.message_id }),
   );
@@ -1159,26 +971,105 @@ async function send(job: Job) {
     : null;
   if (!transactional && campaign?.status !== "active")
     throw new DeferredSend("Campania nu este activă.");
-  const result = await email.send({
-    from: campaign?.sender_identity || resendFrom,
-    to: lead.email,
-    subject: m.subject || "VoxaTech",
-    text: m.body,
-    key: m.id,
-    unsubscribe: `${appUrl()}/unsubscribe/${m.unsubscribe_token}`,
-    replyTo: process.env.RESEND_INBOUND_DOMAIN
-      ? `reply+${m.reply_token}@${process.env.RESEND_INBOUND_DOMAIN}`
-      : undefined,
-  });
+  const from = campaign?.sender_identity || resendFrom;
+  if (!from) throw new Error("Selectează un expeditor conectat.");
+  const replyParent = m.in_reply_to
+    ? check(
+        await admin()
+          .from("messages")
+          .select("metadata,subject")
+          .eq("organization_id", job.organization_id)
+          .eq("id", m.in_reply_to)
+          .single(),
+      )
+    : null;
+  const replyMetadata =
+    replyParent?.metadata &&
+    typeof replyParent.metadata === "object" &&
+    !Array.isArray(replyParent.metadata)
+      ? replyParent.metadata
+      : {};
+  let result: Awaited<ReturnType<typeof sendOrganizationEmail>>;
+  const deliverySubject =
+    typeof replyMetadata.gmail_thread_id === "string" && replyParent?.subject
+      ? /^re:/i.test(replyParent.subject)
+        ? replyParent.subject
+        : `Re: ${replyParent.subject}`
+      : m.subject || "Voxa";
+  try {
+    result = await sendOrganizationEmail(job.organization_id, {
+      from:
+        typeof replyMetadata.mailbox_email === "string"
+          ? replyMetadata.mailbox_email
+          : from,
+      to: lead.email,
+      subject: deliverySubject,
+      text: m.body,
+      key: m.id,
+      unsubscribe: `${appUrl()}/unsubscribe/${m.unsubscribe_token}`,
+      replyTo: process.env.RESEND_INBOUND_DOMAIN
+        ? `reply+${m.reply_token}@${process.env.RESEND_INBOUND_DOMAIN}`
+        : undefined,
+      parentId: m.id,
+      leadId: m.lead_id,
+      threadId:
+        typeof replyMetadata.gmail_thread_id === "string"
+          ? replyMetadata.gmail_thread_id
+          : undefined,
+      inReplyTo:
+        typeof replyMetadata.rfc_message_id === "string" &&
+        /^<[^<>\s]+@[^<>\s]+>$/.test(replyMetadata.rfc_message_id)
+          ? replyMetadata.rfc_message_id
+          : undefined,
+    });
+  } catch (error) {
+    if (error instanceof GmailStoppedError) {
+      check(
+        await admin()
+          .from("messages")
+          .update({ status: "cancelled", reserved_at: null })
+          .eq("organization_id", job.organization_id)
+          .eq("id", m.id)
+          .eq("status", "sending"),
+      );
+      await log(job.organization_id, "email_stopped_before_gmail", m.lead_id, {
+        message_id: m.id,
+        reason: error.message,
+      });
+      return;
+    }
+    if (error instanceof GmailDeferredError) {
+      check(
+        await admin()
+          .from("messages")
+          .update({
+            status: m.approved_by ? "approved" : "queued",
+            reserved_at: null,
+          })
+          .eq("organization_id", job.organization_id)
+          .eq("id", m.id)
+          .eq("status", "sending"),
+      );
+      throw new DeferredSend(error.message);
+    }
+    throw error;
+  }
   if (result.mode === "log") return;
   check(
     await admin()
       .from("messages")
       .update({
         status: "sent",
+        subject: deliverySubject,
         sent_at: new Date().toISOString(),
-        provider: "resend",
+        provider: result.provider,
         provider_message_id: result.id,
+        metadata: {
+          ...messageMetadata(m),
+          ...(result.provider === "gmail"
+            ? { mailbox_email: result.senderEmail }
+            : {}),
+        },
       })
       .eq("id", m.id),
   );
@@ -1208,7 +1099,7 @@ async function summary(org: string) {
   );
 }
 export async function runJob(job: Job) {
-  const lead = job.lead_id
+  let lead = job.lead_id
     ? check(
         await admin()
           .from("leads")
@@ -1223,13 +1114,27 @@ export async function runJob(job: Job) {
       if (lead) await enrich(job, lead);
       break;
     case "create_outreach_drafts":
+      // Imported campaigns must research a new lead before composing its email.
+      // The scheduler reserves only the daily batch, so this does not research
+      // thousands of unused prospects upfront.
+      if (lead && !lead.enriched_at && !lead.do_not_contact) {
+        await enrich(job, lead);
+        lead = check(
+          await admin()
+            .from("leads")
+            .select("*")
+            .eq("organization_id", job.organization_id)
+            .eq("id", lead.id)
+            .single(),
+        );
+      }
       if (lead) await draft(job, lead);
       break;
     case "process_inbound_replies":
       if (lead) await incoming(job, lead);
       break;
     case "generate_requested_demos":
-      if (lead) await demo(job, lead);
+      // Voice demos were retired; historical jobs complete without provider calls.
       break;
     case "send_due_messages":
       await send(job);
@@ -1312,7 +1217,7 @@ export async function runJob(job: Job) {
                 lead_id: data.metadata.lead_id,
                 campaign_id: campaign?.id,
                 direction: "outbound",
-                subject: "VoxaTech · configurarea clinicii",
+                subject: "Voxa · configurarea clinicii",
                 body: `Bună ziua! Vă mulțumim pentru încredere. Pentru a începe configurarea, completați formularul: ${appUrl()}/onboarding/${onboarding.share_token}`,
                 status: "queued",
                 idempotency_key: `onboarding:${data.id}`,
@@ -1337,8 +1242,13 @@ export async function runJob(job: Job) {
   }
 }
 
-function evaluationFit(score: number, reasons: { reason: string; points: number }[]) {
-  const strongest = reasons.slice().sort((a, b) => b.points - a.points)[0]?.reason;
+function evaluationFit(
+  score: number,
+  reasons: { reason: string; points: number }[],
+) {
+  const strongest = reasons
+    .slice()
+    .sort((a, b) => b.points - a.points)[0]?.reason;
   if (score >= 85)
     return `Potrivire excelentă: ${strongest || "site-ul confirmă un flux operațional complex"}, iar mai multe semnale verificate indică un beneficiu clar pentru recepția AI.`;
   if (score >= 65)
@@ -1378,7 +1288,8 @@ function evaluationFlags(lead: Row<"leads">, duplicates: Row<"leads">[]) {
   const uncertain = Object.entries(labels)
     .filter(([key]) => facts[key] == null)
     .map(([, label]) => label);
-  if (uncertain.length) flags.push(`Fapte neconfirmate: ${uncertain.join(", ")}`);
+  if (uncertain.length)
+    flags.push(`Fapte neconfirmate: ${uncertain.join(", ")}`);
   return flags;
 }
 
@@ -1571,7 +1482,11 @@ export async function runAiEvaluationBatch(
       }
     } else if (!existingResearch && !original.website) {
       await enrich(
-        { organization_id: organizationId, lead_id: original.id, payload: {} } as Job,
+        {
+          organization_id: organizationId,
+          lead_id: original.id,
+          payload: {},
+        } as Job,
         original,
       );
     }
@@ -1685,21 +1600,25 @@ export async function runAiEvaluationBatch(
           !Array.isArray(metadata) &&
           metadata.copy_version === outreachCopyVersion,
       );
-    const costObjects = [researchTrace?.details, ...currentReviewMetadata]
-      .filter(
-        (value): value is Record<string, Json | undefined> =>
-          !!value && typeof value === "object" && !Array.isArray(value),
-      );
+    const costObjects = [
+      researchTrace?.details,
+      ...currentReviewMetadata,
+    ].filter(
+      (value): value is Record<string, Json | undefined> =>
+        !!value && typeof value === "object" && !Array.isArray(value),
+    );
     const cost = costObjects.reduce(
       (sum, item) => sum + Number(item.estimated_cost_usd || 0),
       0,
     );
     const tokens = costObjects.reduce((sum, item) => {
       const usage = item.usage || item.token_usage;
-      return sum +
+      return (
+        sum +
         (usage && typeof usage === "object" && !Array.isArray(usage)
           ? Number(usage.total_tokens || 0)
-          : 0);
+          : 0)
+      );
     }, 0);
     const flags = [...evaluationFlags(lead, duplicates), ...extraFlags];
     const details = {
@@ -1725,7 +1644,11 @@ export async function runAiEvaluationBatch(
       process.env.DEFAULT_AUTOMATION_MODEL || "gemini-3.8-flash",
       actorId,
     );
-    results.push({ lead_id: lead.id, company_name: lead.company_name, ...details });
+    results.push({
+      lead_id: lead.id,
+      company_name: lead.company_name,
+      ...details,
+    });
   }
   const total = results.reduce(
     (sum, item) => sum + Number(item.estimated_cost_usd || 0),
@@ -1986,6 +1909,19 @@ export async function runControlledAiTest(
 }
 
 export async function schedule(organization?: string) {
+  const configs = check(
+    await admin()
+      .from("gmail_autopilot_settings")
+      .select("organization_id")
+      .eq("enabled", true),
+  );
+  for (const cfg of configs)
+    if (!organization || cfg.organization_id === organization)
+      check(
+        await admin().rpc("schedule_gmail_autopilot", {
+          org: cfg.organization_id,
+        }),
+      );
   check(
     await admin().rpc("schedule_due_jobs", {
       target_org: organization,
@@ -1995,6 +1931,7 @@ export async function schedule(organization?: string) {
   );
 }
 export async function runWorker(organization?: string) {
+  await syncGmail(organization);
   await schedule(organization);
   const results = [];
   const started = Date.now();

@@ -4,9 +4,20 @@ import https from "node:https";
 import http from "node:http";
 import ipaddr from "ipaddr.js";
 import { load } from "cheerio";
-export async function readPublicWebsite(address: string): Promise<string> {
+export async function readPublicWebsiteDocument(address: string) {
   const original = new URL(address);
-  async function visit(url: URL, depth: number): Promise<string> {
+  const deadline = Date.now() + 14000;
+  async function visit(
+    url: URL,
+    depth: number,
+  ): Promise<{
+    url: string;
+    title: string;
+    text: string;
+    emails: string[];
+    phones: string[];
+    contactUrls: string[];
+  }> {
     if (
       depth > 3 ||
       !["https:", "http:"].includes(url.protocol) ||
@@ -16,7 +27,13 @@ export async function readPublicWebsite(address: string): Promise<string> {
       !["", "80", "443"].includes(url.port)
     )
       throw new Error("Adresă web nepermisă.");
-    const records = await lookup(url.hostname, { all: true });
+    const records = await Promise.race([
+      lookup(url.hostname, { all: true }),
+      new Promise<never>((_, reject) => {
+        const timer = setTimeout(() => reject(new Error("DNS timeout")), 3000);
+        timer.unref();
+      }),
+    ]);
     if (
       !records.length ||
       records.some((r) => ipaddr.process(r.address).range() !== "unicast")
@@ -29,6 +46,7 @@ export async function readPublicWebsite(address: string): Promise<string> {
       body: string;
     }>((resolve, reject) => {
       const client = url.protocol === "https:" ? https : http;
+      if (Date.now() >= deadline) return reject(new Error("Website timeout"));
       const req = client.get(
         url,
         {
@@ -78,12 +96,48 @@ export async function readPublicWebsite(address: string): Promise<string> {
         req.destroy(new Error("Site-ul nu răspunde.")),
       );
       req.on("error", reject);
+      const timer = setTimeout(
+        () => req.destroy(new Error("Website deadline exceeded")),
+        Math.max(1, deadline - Date.now()),
+      );
+      req.on("close", () => clearTimeout(timer));
     });
     if (result.location) return visit(new URL(result.location, url), depth + 1);
     if (result.status !== 200) throw new Error(`Site: HTTP ${result.status}`);
     const $ = load(result.body);
     $("script,style,noscript,iframe,svg").remove();
-    return $("body").text().replace(/\s+/g, " ").trim().slice(0, 22000);
+    const emails = $("a[href^='mailto:']")
+      .map((_, el) => ($(el).attr("href") || "").slice(7).split("?")[0])
+      .get();
+    const phones = $("a[href^='tel:']")
+      .map((_, el) => ($(el).attr("href") || "").slice(4))
+      .get();
+    const contactUrls = $("a[href]")
+      .map((_, el) => {
+        try {
+          const link = new URL($(el).attr("href")!, url);
+          return link.hostname === original.hostname &&
+            /contact/i.test(link.pathname)
+            ? link.href
+            : null;
+        } catch {
+          return null;
+        }
+      })
+      .get()
+      .filter((v): v is string => !!v)
+      .slice(0, 1);
+    return {
+      url: url.href,
+      title: $("title").text().trim().slice(0, 250),
+      text: $("body").text().replace(/\s+/g, " ").trim().slice(0, 14000),
+      emails,
+      phones,
+      contactUrls,
+    };
   }
   return visit(original, 0);
+}
+export async function readPublicWebsite(address: string): Promise<string> {
+  return (await readPublicWebsiteDocument(address)).text;
 }

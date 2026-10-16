@@ -13,6 +13,7 @@ export default async function Page({
   if (
     ![
       "dashboard",
+      "autopilot",
       "leads",
       "campaigns",
       "inbox",
@@ -30,7 +31,7 @@ export default async function Page({
   return (
     <Workspace
       key={route.join("/")}
-      initial={await getSnapshot(s)}
+      initial={await getSnapshot(s, route.join("/"))}
       path={route.join("/")}
     />
   );

@@ -73,12 +73,14 @@ export function CampaignReviewCenter({
   busy,
   manager,
   act,
+  requestInternalTest,
 }: {
   data: Snapshot;
   campaignId: string;
   busy: boolean;
   manager: boolean;
   act: (action: string, input: unknown) => Promise<unknown>;
+  requestInternalTest: (messageId: string) => void;
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
@@ -101,7 +103,8 @@ export function CampaignReviewCenter({
       );
     });
     const inbound = data.messages.some(
-      (item) => item.lead_id === membership.lead_id && item.direction === "inbound",
+      (item) =>
+        item.lead_id === membership.lead_id && item.direction === "inbound",
     );
     const suppressed = data.suppression_list.some(
       (item) =>
@@ -110,7 +113,8 @@ export function CampaignReviewCenter({
     );
     const metadata = object(message?.metadata);
     let status: ReviewStatus = "Draft";
-    if (suppressed || lead?.status === "DO_NOT_CONTACT") status = "Unsubscribed";
+    if (suppressed || lead?.status === "DO_NOT_CONTACT")
+      status = "Unsubscribed";
     else if (inbound || lead?.status === "REPLIED") status = "Replied";
     else if (message?.status === "bounced") status = "Bounced";
     else if (["sent", "delivered", "opened"].includes(message?.status || ""))
@@ -124,7 +128,10 @@ export function CampaignReviewCenter({
   });
 
   const counts = Object.fromEntries(
-    statuses.map((status) => [status, rows.filter((row) => row.status === status).length]),
+    statuses.map((status) => [
+      status,
+      rows.filter((row) => row.status === status).length,
+    ]),
   ) as Record<ReviewStatus, number>;
   const latestEvaluations = useMemo(() => {
     const byLead = new Map<string, Snapshot["activities"][number]>();
@@ -147,18 +154,25 @@ export function CampaignReviewCenter({
   );
   const resend = data.integrations.find((item) => item.provider === "resend");
   const resendConfig = object(resend?.public_config);
-  const senderVerified =
-    data.providers.resend &&
-    !!resend?.last_verified_at &&
-    resendConfig.sender_domain_verified === true;
+  const gmail = data.gmail_accounts.find(
+    (account) => account.email === campaign?.sender_identity,
+  );
+  const senderVerified = gmail
+    ? data.providers.gmail && gmail.status === "connected"
+    : data.providers.resend &&
+      !!resend?.last_verified_at &&
+      resendConfig.sender_domain_verified === true;
   const recipientsValid =
     rows.length > 0 && rows.every((row) => validProspectEmail(row.lead?.email));
   const approvedComplete =
     rows.length > 0 && rows.every((row) => row.message?.status === "approved");
   const copyCompliant =
     rows.length > 0 &&
-    rows.every((row) => !!row.message && hasIdentityAndOptOut(row.message.body));
-  const dailyLimitValid = !!campaign && campaign.daily_cap > 0 && campaign.daily_cap <= 10;
+    rows.every(
+      (row) => !!row.message && hasIdentityAndOptOut(row.message.body),
+    );
+  const dailyLimitValid =
+    !!campaign && campaign.daily_cap > 0 && campaign.daily_cap <= 10;
   const liveMode = data.delivery === "live";
   const canOpenLaunch =
     senderVerified &&
@@ -169,10 +183,13 @@ export function CampaignReviewCenter({
     liveMode;
 
   const checklist = [
-    ["Domeniu expeditor conectat și verificat", senderVerified],
+    ["Expeditor conectat și verificat", senderVerified],
     ["Toți destinatarii au email valid, fără placeholder", recipientsValid],
     ["Toate Variantele B sunt aprobate", approvedComplete],
-    ["Identitatea VoxaTech și linia de opt-out sunt prezente", copyCompliant],
+    [
+      "Identitatea Voxa, voxatech.ro și linia de opt-out sunt prezente",
+      copyCompliant,
+    ],
     ["Limita zilnică este maximum 10", dailyLimitValid],
     ["Livrarea reală este activată explicit în mediu", liveMode],
     ["Confirmarea manuală finală", false],
@@ -218,8 +235,8 @@ export function CampaignReviewCenter({
           <p className="eyebrow">Review &amp; Launch Center</p>
           <h2>{campaign.name}</h2>
           <p className="copy">
-            Varianta B este recomandată. Niciun mesaj către prospect nu pleacă din
-            această pagină fără aprobarea și lansarea finală.
+            Varianta B este recomandată. Niciun mesaj către prospect nu pleacă
+            din această pagină fără aprobarea și lansarea finală.
           </p>
         </div>
         <div className="actions">
@@ -256,20 +273,27 @@ export function CampaignReviewCenter({
         <div className="panel-head">
           <div>
             <h2>Checklist înainte de lansare</h2>
-            <small>Verificările sunt repetate pe server înainte de activare.</small>
+            <small>
+              Verificările sunt repetate pe server înainte de activare.
+            </small>
           </div>
-          <Button
-            size="sm"
-            variant="secondary"
-            disabled={!manager || busy || !data.providers.resend}
-            onClick={() => act("resend_verify_sender", {})}
-          >
-            <RefreshCw size={14} /> Verifică domeniul Resend
-          </Button>
+          {!gmail && (
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={!manager || busy || !data.providers.resend}
+              onClick={() => act("resend_verify_sender", {})}
+            >
+              <RefreshCw size={14} /> Verifică domeniul Resend
+            </Button>
+          )}
         </div>
         <div className="checklist-grid">
           {checklist.map(([label, complete]) => (
-            <div className={`check-item ${complete ? "complete" : ""}`} key={label}>
+            <div
+              className={`check-item ${complete ? "complete" : ""}`}
+              key={label}
+            >
               {complete ? <Check size={16} /> : <CircleAlert size={16} />}
               <span>{label}</span>
             </div>
@@ -314,31 +338,45 @@ export function CampaignReviewCenter({
                 expanded={expanded === message?.id}
                 editing={editing === message?.id}
                 draftEdit={draftEdit}
-                note={notes[message?.id || ""] ?? String(metadata.internal_note || "")}
+                note={
+                  notes[message?.id || ""] ??
+                  String(metadata.internal_note || "")
+                }
                 onNote={(value) =>
-                  message && setNotes((current) => ({ ...current, [message.id]: value }))
+                  message &&
+                  setNotes((current) => ({ ...current, [message.id]: value }))
                 }
                 onExpand={() =>
-                  message && setExpanded(expanded === message.id ? null : message.id)
+                  message &&
+                  setExpanded(expanded === message.id ? null : message.id)
                 }
                 onEdit={() => {
                   if (!message) return;
                   setExpanded(message.id);
                   setEditing(message.id);
-                  setDraftEdit({ subject: message.subject || "", body: message.body });
+                  setDraftEdit({
+                    subject: message.subject || "",
+                    body: message.body,
+                  });
                 }}
                 onEditChange={setDraftEdit}
                 onCancelEdit={() => setEditing(null)}
                 onAct={act}
+                requestInternalTest={requestInternalTest}
               />
             ))}
           </tbody>
         </Table>
       </section>
 
-      <Modal open={launchOpen} onOpenChange={setLaunchOpen} title="Confirmare finală de lansare">
+      <Modal
+        open={launchOpen}
+        onOpenChange={setLaunchOpen}
+        title="Confirmare finală de lansare"
+      >
         <p className="copy">
-          Această acțiune permite livrarea către destinatarii aprobați. Scrie exact
+          Această acțiune permite livrarea către destinatarii aprobați. Scrie
+          exact
           <strong> {launchConfirmation}</strong> pentru confirmare.
         </p>
         <label className="field section-gap">
@@ -389,6 +427,7 @@ function ReviewRow({
   onEditChange,
   onCancelEdit,
   onAct,
+  requestInternalTest,
 }: {
   lead: Snapshot["leads"][number] | undefined;
   message: Snapshot["messages"][number] | undefined;
@@ -406,6 +445,7 @@ function ReviewRow({
   onEditChange: (value: { subject: string; body: string }) => void;
   onCancelEdit: () => void;
   onAct: (action: string, input: unknown) => Promise<unknown>;
+  requestInternalTest: (messageId: string) => void;
 }) {
   const tone = ["Approved", "Sent", "Replied", "Test sent"].includes(status)
     ? "green"
@@ -418,10 +458,16 @@ function ReviewRow({
     <>
       <tr>
         <td>
-          {lead ? <Link href={`/leads/${lead.id}`}>{lead.company_name}</Link> : "—"}
+          {lead ? (
+            <Link href={`/leads/${lead.id}`}>{lead.company_name}</Link>
+          ) : (
+            "—"
+          )}
         </td>
         <td>
-          <span className={validProspectEmail(lead?.email) ? "" : "text-warning"}>
+          <span
+            className={validProspectEmail(lead?.email) ? "" : "text-warning"}
+          >
             {lead?.email || "Lipsește"}
           </span>
         </td>
@@ -434,16 +480,28 @@ function ReviewRow({
         </td>
         <td>
           <div className="actions review-actions">
-            <Button size="sm" variant="ghost" disabled={!message} onClick={onExpand}>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={!message}
+              onClick={onExpand}
+            >
               <Eye size={14} /> Deschide
             </Button>
-            <Button size="sm" variant="ghost" disabled={!message || busy} onClick={onEdit}>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={!message || busy}
+              onClick={onEdit}
+            >
               <FilePenLine size={14} /> Editează
             </Button>
             <Button
               size="sm"
               disabled={!manager || !message || busy || status === "Approved"}
-              onClick={() => message && onAct("message_approve", { id: message.id })}
+              onClick={() =>
+                message && onAct("message_approve", { id: message.id })
+              }
             >
               <Check size={14} /> Aprobă
             </Button>
@@ -462,7 +520,10 @@ function ReviewRow({
                       <input
                         value={draftEdit.subject}
                         onChange={(event) =>
-                          onEditChange({ ...draftEdit, subject: event.target.value })
+                          onEditChange({
+                            ...draftEdit,
+                            subject: event.target.value,
+                          })
                         }
                       />
                     </label>
@@ -472,7 +533,10 @@ function ReviewRow({
                         rows={10}
                         value={draftEdit.body}
                         onChange={(event) =>
-                          onEditChange({ ...draftEdit, body: event.target.value })
+                          onEditChange({
+                            ...draftEdit,
+                            body: event.target.value,
+                          })
                         }
                       />
                     </label>
@@ -501,7 +565,8 @@ function ReviewRow({
                     <h3>{message.subject}</h3>
                     <p className="copy review-copy">{message.body}</p>
                     <small>
-                      Cost AI estimat: ${Number(metadata.estimated_cost_usd || 0).toFixed(6)}
+                      Cost AI estimat: $
+                      {Number(metadata.estimated_cost_usd || 0).toFixed(6)}
                     </small>
                   </>
                 )}
@@ -509,14 +574,20 @@ function ReviewRow({
               <aside className="review-notes">
                 <label className="field">
                   Notă internă
-                  <textarea rows={5} value={note} onChange={(event) => onNote(event.target.value)} />
+                  <textarea
+                    rows={5}
+                    value={note}
+                    onChange={(event) => onNote(event.target.value)}
+                  />
                 </label>
                 <div className="actions section-gap">
                   <Button
                     size="sm"
                     variant="secondary"
                     disabled={busy}
-                    onClick={() => onAct("message_note", { id: message.id, note })}
+                    onClick={() =>
+                      onAct("message_note", { id: message.id, note })
+                    }
                   >
                     Salvează nota
                   </Button>
@@ -524,7 +595,7 @@ function ReviewRow({
                     size="sm"
                     variant="secondary"
                     disabled={!manager || busy}
-                    onClick={() => onAct("message_test", { id: message.id })}
+                    onClick={() => requestInternalTest(message.id)}
                   >
                     <MailCheck size={14} /> Trimite test mie
                   </Button>
@@ -532,7 +603,9 @@ function ReviewRow({
                     size="sm"
                     variant="secondary"
                     disabled={!manager || busy}
-                    onClick={() => onAct("message_regenerate", { id: message.id })}
+                    onClick={() =>
+                      onAct("message_regenerate", { id: message.id })
+                    }
                   >
                     <RefreshCw size={14} /> Regenerează
                   </Button>
@@ -540,13 +613,16 @@ function ReviewRow({
                     size="sm"
                     variant="destructive"
                     disabled={!manager || busy}
-                    onClick={() => onAct("message_reject", { id: message.id, note })}
+                    onClick={() =>
+                      onAct("message_reject", { id: message.id, note })
+                    }
                   >
                     <X size={14} /> Respinge
                   </Button>
                 </div>
                 <p className="muted section-gap" style={{ fontSize: 12 }}>
-                  Testul este trimis exclusiv la INTERNAL_TEST_EMAIL. Adresa prospectului nu este folosită.
+                  Testul este trimis exclusiv la INTERNAL_TEST_EMAIL. Adresa
+                  prospectului nu este folosită.
                 </p>
               </aside>
             </div>

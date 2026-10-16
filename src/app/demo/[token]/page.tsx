@@ -66,7 +66,7 @@ export default async function Page({
       <div className="brand">
         <BrandMark />
         <div>
-          voxa<small>TECH</small>
+          Voxa
         </div>
       </div>
       <DemoPlayer

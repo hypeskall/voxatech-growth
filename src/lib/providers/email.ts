@@ -1,5 +1,8 @@
 import "server-only";
 import { Resend } from "resend";
+import { internalTestRecipient } from "@/lib/internal-test-email";
+import { gmailAccount, sendGmail } from "./gmail";
+import { admin, check } from "../db";
 export interface EmailProvider {
   send(input: {
     from: string;
@@ -27,7 +30,7 @@ export class ResendProvider implements EmailProvider {
         to: input.to,
         subject: input.subject,
         text: `${input.text}\n\nDezabonare: ${input.unsubscribe}`,
-        replyTo: input.replyTo,
+        replyTo: process.env.EMAIL_REPLY_TO || "contact@voxatech.ro",
         headers: {
           "List-Unsubscribe": `<${input.unsubscribe}>`,
           "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
@@ -46,17 +49,18 @@ export class ResendProvider implements EmailProvider {
   }) {
     const apiKey = process.env.RESEND_API_KEY;
     const from = process.env.RESEND_FROM_EMAIL;
-    const to = process.env.INTERNAL_TEST_EMAIL;
-    if (!apiKey || !from || !to)
+    if (!apiKey || !from || !process.env.INTERNAL_TEST_EMAIL)
       throw new Error(
         "Testul intern necesită RESEND_API_KEY, RESEND_FROM_EMAIL și INTERNAL_TEST_EMAIL.",
       );
+    const to = internalTestRecipient(process.env.INTERNAL_TEST_EMAIL);
     const result = await new Resend(apiKey).emails.send(
       {
         from,
         to,
+        replyTo: process.env.EMAIL_REPLY_TO || "contact@voxatech.ro",
         subject: `[TEST INTERN] ${input.subject}`,
-        text: `Acesta este un test intern Voxa Growth. Nu a fost contactat niciun prospect.\n\n${input.text}`,
+        text: `Acesta este un test intern Voxa. Nu a fost contactat niciun prospect.\n\n${input.text}`,
       },
       { idempotencyKey: input.key },
     );
@@ -65,6 +69,70 @@ export class ResendProvider implements EmailProvider {
   }
 }
 export const email: EmailProvider = new ResendProvider();
+
+export async function sendOrganizationEmail(
+  org: string,
+  input: Parameters<EmailProvider["send"]>[0] & {
+    parentId?: string;
+    leadId?: string;
+    threadId?: string;
+    inReplyTo?: string;
+  },
+) {
+  if (process.env.EMAIL_DELIVERY_MODE !== "live")
+    return {
+      id: null,
+      mode: "log" as const,
+      provider: "gmail" as const,
+      senderEmail: input.from,
+    };
+  const previous = check(
+    await admin()
+      .from("gmail_delivery_attempts")
+      .select("account_id")
+      .eq("organization_id", org)
+      .eq("delivery_key", input.key)
+      .maybeSingle(),
+  );
+  const account = previous
+    ? check(
+        await admin()
+          .from("gmail_accounts")
+          .select("*")
+          .eq("organization_id", org)
+          .eq("id", previous.account_id)
+          .single(),
+      )
+    : await gmailAccount(org, input.from);
+  if (account)
+    return { ...(await sendGmail(account, input)), senderEmail: account.email };
+  if (/@(?:gmail|googlemail)\.com$/i.test(input.from))
+    throw new Error("Conectează această căsuță Gmail înainte de trimitere.");
+  return {
+    ...(await email.send(input)),
+    provider: "resend" as const,
+    senderEmail: input.from,
+  };
+}
+export async function sendOrganizationInternalTest(
+  org: string,
+  from: string | null,
+  input: Parameters<EmailProvider["sendInternalTest"]>[0],
+) {
+  const account = from ? await gmailAccount(org, from) : null;
+  if (account) {
+    const sent = await sendGmail(account, {
+      ...input,
+      to: internalTestRecipient(process.env.INTERNAL_TEST_EMAIL),
+      subject: `[TEST INTERN] ${input.subject}`,
+      text: `Acesta este un test intern Voxa. Nu a fost contactat niciun prospect.\n\n${input.text}`,
+    });
+    return { id: sent.id, mode: "internal-test" as const };
+  }
+  if (from && /@(?:gmail|googlemail)\.com$/i.test(from))
+    throw new Error("Conectează căsuța Gmail pentru test.");
+  return email.sendInternalTest(input);
+}
 
 export async function verifyResendSenderDomain() {
   const apiKey = process.env.RESEND_API_KEY;

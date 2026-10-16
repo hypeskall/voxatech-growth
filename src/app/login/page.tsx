@@ -15,7 +15,7 @@ export default function Login() {
         <div className="brand">
           <BrandMark />
           <div>
-            voxa<small>GROWTH</small>
+            Voxa
           </div>
         </div>
         <h1>Bine ai revenit.</h1>

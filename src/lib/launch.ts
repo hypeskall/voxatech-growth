@@ -22,6 +22,7 @@ export function validProspectEmail(value: string | null | undefined) {
     !!local &&
     !!domain &&
     !placeholderDomains.has(domain) &&
+    !/\.(invalid|test|example|localhost)$/i.test(domain) &&
     !/(example|placeholder|invalid|website|noreply|no-reply|donotreply)/iu.test(
       `${local}@${domain}`,
     )
@@ -30,7 +31,8 @@ export function validProspectEmail(value: string | null | undefined) {
 
 export function hasIdentityAndOptOut(body: string) {
   return (
-    /VoxaTech/u.test(body) &&
+    (/VoxaTech/u.test(body) ||
+      (/\bVoxa\b/u.test(body) && /voxatech\.ro/u.test(body))) &&
     /(nu (?:vă|te) mai contactez|nu mai revenim|dezabon|opr(?:im|iți) mesajele)/iu.test(
       body,
     )

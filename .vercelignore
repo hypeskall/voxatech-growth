@@ -1,0 +1,14 @@
+# Local credentials, OAuth downloads and one-use preview helpers never deploy.
+.env*
+.secrets/
+.tool-cache/
+.npm-cache/
+.agents/
+.codex/
+supabase/.temp/
+scripts/*.local.mjs
+scripts/*leads.local.json
+verification*.local.json
+coverage/
+artifacts/
+*.log

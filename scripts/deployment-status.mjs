@@ -1,0 +1,11 @@
+import {readFile} from 'node:fs/promises';
+const link=JSON.parse(await readFile(new URL('../.vercel/project.json',import.meta.url),'utf8'));
+const auth=JSON.parse(await readFile(`${process.env.APPDATA}/com.vercel.cli/Data/auth.json`,'utf8'));
+const deployment=process.argv[2] || 'voxa-growth-h695l9ppu-3111923721-8251s-projects.vercel.app';
+const r=await fetch(`https://api.vercel.com/v13/deployments/${deployment}?teamId=${link.orgId}`,{headers:{Authorization:`Bearer ${auth.token}`}});
+const d=await r.json();
+console.log(JSON.stringify(Object.fromEntries(['id','url','name','readyState','status','readySubstate','errorCode','errorMessage','errorStep','aliasError','plan','isInConcurrentBuildsQueue','isInSystemBuildsQueue','queuedForConcurrencyAt','queuedForBuildContainerAt','block','buildContainerFinishedAt','oomReport','checks','inspectorUrl','gitSource','meta','aliasAssigned','createdAt','buildingAt','ready','softBlock'].map(k=>[k,d[k]])),null,2));
+console.log(Object.keys(d));
+console.log({readyStateReason:d.readyStateReason,seatBlock:d.seatBlock,errorLink:d.errorLink,alwaysRefuseToBuild:d.alwaysRefuseToBuild});
+const events=await fetch(`https://api.vercel.com/v3/deployments/${d.id}/events?teamId=${link.orgId}&limit=20&follow=0`,{headers:{Authorization:`Bearer ${auth.token}`}}).then(r=>r.json());
+console.log(JSON.stringify(events).slice(0,5000));

@@ -42,7 +42,7 @@ export function AnimatedValue({ value }: { value: string | number }) {
     let frame = 0;
     const start = performance.now();
     const tick = (now: number) => {
-      const progress = Math.min(1, (now - start) / 650);
+      const progress = Math.min(1, (now - start) / 200);
       if (ref.current)
         ref.current.textContent = Math.round(
           value * (1 - (1 - progress) ** 3),

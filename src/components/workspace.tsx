@@ -1,6 +1,7 @@
 "use client";
-import { useState } from "react";
-import { Ambient, AnimatedValue } from "./ambient";
+import { outreachCopyVersion } from "@/lib/outreach-template";
+import { useEffect, useState } from "react";
+import { AnimatedValue } from "./ambient";
 import { BrandMark } from "./brand-mark";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -31,6 +32,7 @@ import {
   Pause,
   Ellipsis,
   Mail,
+  MailCheck,
   Globe,
   Check,
   ChevronLeft,
@@ -40,12 +42,25 @@ import {
   Target,
   Wallet,
   CheckCircle2,
+  Trash2,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Modal } from "./ui/dialog";
 import { Table } from "./ui/table";
-import { ImportDialog } from "./import-dialog";
+import dynamic from "next/dynamic";
+import { LeadListsPanel } from "./lead-lists-panel";
+const ImportDialog = dynamic(() =>
+  import("./import-dialog").then((m) => m.ImportDialog),
+);
 import { CampaignReviewCenter } from "./campaign-review-center";
+import {
+  GmailAccountsPanel,
+  GmailAutopilotPanel,
+  GmailInbox,
+} from "./gmail-workspace";
+
+import { CampaignWizard } from "./campaign-wizard";
+import { Drawer } from "./ui/drawer";
 import {
   statuses,
   statusLabels,
@@ -59,13 +74,12 @@ import {
 import type { Snapshot } from "@/lib/snapshot";
 import type { Json } from "@/lib/supabase/database.types";
 const nav = [
-  ["dashboard", "Privire de ansamblu", LayoutDashboard],
-  ["leads", "Prospecte", Users],
-  ["campaigns", "Campanii", Send],
-  ["inbox", "Conversații", Inbox],
-  ["demos", "Demo-uri", AudioLines],
-  ["knowledge-base", "Bază de cunoștințe", BookOpen],
-  ["analytics", "Analize", ChartNoAxesCombined],
+  ["dashboard", "Dashboard", LayoutDashboard],
+  ["leads", "Leads", Users],
+  ["autopilot", "Autopilot", Search],
+  ["campaigns", "Outreach", Send],
+  ["inbox", "Inbox", Inbox],
+  ["analytics", "Analytics", ChartNoAxesCombined],
 ] as const;
 const roleNames: Record<string, string> = {
   owner: "Proprietar",
@@ -129,6 +143,7 @@ const activityLabels: Record<string, string> = {
   message_note: "Notă internă actualizată",
   message_regenerate: "Ciornă regenerată",
   message_test_sent: "Test intern trimis",
+  message_test_failed: "Test intern nereușit",
   campaign_active: "Campanie activată",
   campaign_paused: "Campanie pusă în pauză",
   campaign_archived: "Campanie arhivată",
@@ -136,13 +151,35 @@ const activityLabels: Record<string, string> = {
   demo_listened: "Demo ascultat",
   onboarding_completed: "Onboarding finalizat",
 };
-const outreachCopyVersion = "pain-first-v3";
+
 function Badge({ value }: { value: string }) {
   return (
     <span
+      title={statusLabels[value] || labels[value] || value}
       className={`badge ${["WON", "ready", "completed", "active", "delivered"].includes(value) ? "green" : ["HUMAN_REQUIRED", "failed", "bounced"].includes(value) ? "amber" : ["DO_NOT_CONTACT", "LOST"].includes(value) ? "red" : ["QUALIFIED", "DEMO_SENT", "TRIAL", "approved"].includes(value) ? "purple" : ""}`}
     >
-      {statusLabels[value] || labels[value] || value}
+      {(
+        {
+          NEW: "New",
+          ENRICHING: "New",
+          READY_FOR_OUTREACH: "New",
+          CONTACTED: "Contacted",
+          FOLLOW_UP_1: "Contacted",
+          FOLLOW_UP_2: "Contacted",
+          REPLIED: "Replied",
+          QUALIFIED: "Qualified",
+          DEMO_GENERATING: "Qualified",
+          DEMO_SENT: "Qualified",
+          TRIAL: "Qualified",
+          CHECKOUT_SENT: "Qualified",
+          WON: "Won",
+          LOST: "Lost",
+          DO_NOT_CONTACT: "Lost",
+        } as Record<string, string>
+      )[value] ||
+        statusLabels[value] ||
+        labels[value] ||
+        value}
     </span>
   );
 }
@@ -280,9 +317,10 @@ export function Workspace({
   const [data, setData] = useState(initial);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState("");
+  const [refreshProblem, setRefreshProblem] = useState("");
   const [mobile, setMobile] = useState(false);
   const [modal, setModal] = useState<
-    "lead" | "campaign" | "knowledge" | "import" | null
+    "lead" | "campaign" | "knowledge" | "import" | "trash" | null
   >(null);
   const [edit, setEdit] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<{
@@ -290,6 +328,14 @@ export function Workspace({
     text: string;
     run: () => Promise<unknown>;
   } | null>(null);
+  const [drawerId, setDrawerId] = useState<string | null>(null);
+  const [messageEdit, setMessageEdit] = useState<{
+    id: string;
+    body: string;
+  } | null>(null);
+  const [outreachTab, setOutreachTab] = useState("campaigns");
+  const [campaignStep, setCampaignStep] = useState(0);
+
   const [tab, setTab] = useState("overview");
   const [query, setQuery] = useState("");
   const [filters, setFilters] = useState<Record<string, string>>({});
@@ -297,9 +343,65 @@ export function Workspace({
   const [page, setPage] = useState(0);
   const [bulkCampaign, setBulkCampaign] = useState("");
   const [bulkStatus, setBulkStatus] = useState("NEW");
-  const [inboxLead, setInboxLead] = useState("");
+
+  const [analyticsMode, setAnalyticsMode] = useState("production");
   const [range, setRange] = useState({ from: "", to: "" });
   const section = path.split("/")[0];
+  useEffect(() => {
+    if (!["dashboard", "autopilot", "inbox"].includes(section)) return;
+    let mounted = true;
+    let pending = false;
+    const controller = new AbortController();
+    async function poll() {
+      if (pending || document.hidden) return;
+      pending = true;
+      try {
+        const response = await fetch(
+          `/api/snapshot?path=${encodeURIComponent(path)}`,
+          {
+            cache: "no-store",
+            signal: AbortSignal.any([
+              controller.signal,
+              AbortSignal.timeout(15000),
+            ]),
+          },
+        );
+        if (!response.ok)
+          throw new Error(
+            response.status === 401
+              ? "Sesiunea a expirat. Autentifică-te din nou pentru date actualizate."
+              : "Datele nu se mai actualizează. Verifică internetul și reîncearcă.",
+          );
+        const next = await response.json();
+        if (mounted) {
+          setData(next);
+          setRefreshProblem("");
+        }
+      } catch (error) {
+        if (mounted)
+          setRefreshProblem(
+            error instanceof Error && error.name === "Error"
+              ? error.message
+              : "Actualizarea automată este întreruptă. Verifică internetul și reîncearcă.",
+          );
+      } finally {
+        pending = false;
+      }
+    }
+    const timer = setInterval(() => {
+      void poll();
+    }, 15000);
+    const onVisibility = () => {
+      if (!document.hidden) void poll();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      mounted = false;
+      controller.abort();
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [section, path]);
   const leadId = section === "leads" ? path.split("/")[1] : undefined;
   const campaignReviewId =
     section === "campaigns" && path.split("/")[2] === "review"
@@ -312,15 +414,26 @@ export function Workspace({
       ? "Integrări"
       : section === "settings"
         ? "Setări"
-        : nav.find((n) => n[0] === section)?.[1] || "Voxa Growth";
+        : section === "demos"
+          ? "Demo-uri"
+          : section === "knowledge-base"
+            ? "Bază de cunoștințe"
+            : nav.find((n) => n[0] === section)?.[1] || "Voxa";
   const tell = (message: string) => {
     setToast(message);
     setTimeout(() => setToast(""), 6500);
   };
   async function refresh() {
-    const response = await fetch("/api/snapshot");
+    const response = await fetch(
+      `/api/snapshot?path=${encodeURIComponent(path)}`,
+      {
+        cache: "no-store",
+        signal: AbortSignal.timeout(15000),
+      },
+    );
     if (!response.ok) throw new Error("Nu am putut actualiza datele.");
     setData(await response.json());
+    setRefreshProblem("");
   }
   async function act(action: string, input: unknown) {
     setBusy(true);
@@ -338,7 +451,11 @@ export function Workspace({
         return result;
       }
       await refresh();
-      tell("Modificările au fost salvate.");
+      tell(
+        action === "message_test"
+          ? "Testul real a fost trimis exclusiv la INTERNAL_TEST_EMAIL. Prospectul nu a fost contactat."
+          : "Modificările au fost salvate.",
+      );
       return result;
     } catch (error) {
       tell(error instanceof Error ? error.message : "Eroare neașteptată.");
@@ -347,12 +464,38 @@ export function Workspace({
       setBusy(false);
     }
   }
+  function requestDelete(ids: string[]) {
+    setConfirm({
+      title: "Șterge leadurile",
+      text: `Muți ${ids.length} leaduri în coș? Joburile și mesajele în așteptare vor fi oprite. Le poți restaura din Coș.`,
+      run: async () => {
+        const result = await act("lead_delete", { ids });
+        if (result !== null) {
+          setSelected([]);
+          setDrawerId(null);
+          if (leadId) {
+            router.push("/leads");
+            router.refresh();
+          }
+        }
+        return result;
+      },
+    });
+  }
+  function requestInternalTest(messageId: string) {
+    setConfirm({
+      title: "Trimite test intern real",
+      text: "Confirmi trimiterea unui email real exclusiv la adresa internă configurată prin INTERNAL_TEST_EMAIL? Adresa și statusul prospectului nu vor fi modificate, iar campania rămâne în modul log.",
+      run: () => act("message_test", { id: messageId }),
+    });
+  }
   const open = (type: typeof modal, id: string | null = null) => {
     setEdit(id);
+    if (type === "campaign") setCampaignStep(0);
     setModal(type);
   };
   const leadName = (id: string | null) =>
-    data.leads.find((l) => l.id === id)?.company_name || "VoxaTech";
+    data.leads.find((l) => l.id === id)?.company_name || "Voxa";
   const today = bucharest().date;
   const leads = data.leads;
   const count = (status: string) =>
@@ -368,6 +511,10 @@ export function Workspace({
           .join(" ")
           .toLowerCase()
           .includes(query.toLowerCase())) &&
+      (!filters.lead_list_id ||
+        (filters.lead_list_id === "unassigned"
+          ? !l.lead_list_id
+          : l.lead_list_id === filters.lead_list_id)) &&
       (!filters.status || l.status === filters.status) &&
       (!filters.city || l.city === filters.city) &&
       (!filters.niche || l.niche === filters.niche) &&
@@ -383,7 +530,16 @@ export function Workspace({
     [
       ...new Set(leads.map((l) => l[field]).filter((v): v is string => !!v)),
     ].sort();
-  const selectedLead = leads.find((l) => l.id === leadId);
+  const selectedLead = leads.find((l) => l.id === (drawerId || leadId));
+
+  const showLead = (id: string) => {
+    setTab("overview");
+    setDrawerId(id);
+  };
+  const closeLead = () => {
+    setDrawerId(null);
+    if (leadId) router.push("/leads");
+  };
   const editLead = leads.find((l) => l.id === edit);
   const editCampaign = data.campaigns.find((c) => c.id === edit);
   const editKnowledge = data.knowledge_base_documents.find(
@@ -415,7 +571,9 @@ export function Workspace({
     return data.campaign_leads
       .filter((item) => item.campaign_id === campaignId)
       .map((item) => {
-        const lead = data.leads.find((candidate) => candidate.id === item.lead_id);
+        const lead = data.leads.find(
+          (candidate) => candidate.id === item.lead_id,
+        );
         const primaryDraft = data.messages.find((message) => {
           const metadata = jsonObject(message.metadata);
           return (
@@ -454,14 +612,6 @@ export function Workspace({
         onClick={() => act("bulk_draft", { ids: [id] })}
       >
         Generează mesaj
-      </Button>
-      <Button
-        size="sm"
-        disabled={!canEdit || busy}
-        onClick={() => act("demo", { ids: [id] })}
-      >
-        <AudioLines size={14} />
-        Generează demo
       </Button>
     </div>
   );
@@ -549,10 +699,8 @@ export function Workspace({
       >
         <div className="message-top">
           <span>
-            {m.direction === "outbound"
-              ? "Echipa VoxaTech"
-              : leadName(m.lead_id)}{" "}
-            · {dateTime(m.created_at)}
+            {m.direction === "outbound" ? "Echipa Voxa" : leadName(m.lead_id)} ·{" "}
+            {dateTime(m.created_at)}
             {metadata.outreach_variant
               ? ` · Varianta ${String(metadata.outreach_variant)}${metadata.primary_style ? " · Recomandată" : ""}`
               : ""}
@@ -576,13 +724,7 @@ export function Workspace({
               <Button
                 size="sm"
                 variant="secondary"
-                onClick={() => {
-                  const body = window.prompt(
-                    "Editează mesajul înainte de aprobare:",
-                    m.body,
-                  );
-                  if (body) act("message_save", { id: m.id, body });
-                }}
+                onClick={() => setMessageEdit({ id: m.id, body: m.body })}
               >
                 Editează
               </Button>
@@ -605,6 +747,15 @@ export function Workspace({
                   Aprobă
                 </Button>
               )}
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={!manager || busy}
+                onClick={() => requestInternalTest(m.id)}
+              >
+                <MailCheck size={14} />
+                Trimite test mie
+              </Button>
             </div>
           )}
       </div>
@@ -612,14 +763,34 @@ export function Workspace({
   }
   const cohort = leads.filter(
     (l) =>
+      (section !== "analytics" ||
+        analyticsMode === "all" ||
+        !/demo|dry.run|controlled.test|evaluare-controlata/i.test(
+          l.source || "",
+        )) &&
       (!range.from || l.created_at.slice(0, 10) >= range.from) &&
       (!range.to || l.created_at.slice(0, 10) <= range.to),
   );
   const ids = new Set(cohort.map((l) => l.id));
-  const cohortMessages = data.messages.filter((m) => ids.has(m.lead_id));
+  const cohortMessages = data.messages.filter(
+    (m) =>
+      ids.has(m.lead_id) &&
+      (section !== "analytics" ||
+        analyticsMode === "all" ||
+        m.direction !== "outbound" ||
+        (m.provider !== "local-dry-run" && !jsonObject(m.metadata).simulated)),
+  );
   const contacted = new Set(
     cohortMessages
-      .filter((m) => m.direction === "outbound" && m.sent_at)
+      .filter(
+        (m) =>
+          m.direction === "outbound" &&
+          m.sent_at &&
+          (section !== "analytics" ||
+            analyticsMode === "all" ||
+            (m.provider !== "local-dry-run" &&
+              !jsonObject(m.metadata).simulated)),
+      )
       .map((m) => m.lead_id),
   );
   const replied = new Set(
@@ -700,31 +871,24 @@ export function Workspace({
     jsonObject(geminiIntegration.public_config).health === "healthy";
   return (
     <div className="shell">
-      <Ambient />
       {busy && <div className="loading-bar" />}
       <aside className={`sidebar ${mobile ? "open" : ""}`}>
         <Link className="brand" href="/dashboard">
           <BrandMark />
-          <div>
-            voxa<small>GROWTH</small>
-          </div>
+          <div>Voxa</div>
         </Link>
-        <div className="workspace-name">
-          <span className="mini-avatar">V</span>
-          <div>
-            VoxaTech
-            <small style={{ display: "block", fontSize: 11 }}>
-              Spațiu de lucru intern
-            </small>
-          </div>
-        </div>
-        <div className="nav-caption">SPAȚIU DE LUCRU</div>
         <nav className="nav">
           {nav.map(([url, label, Icon]) => (
             <Link
+              prefetch={false}
               key={url}
               href={`/${url}`}
-              className={section === url ? "active" : ""}
+              className={
+                section === url || (url === "campaigns" && section === "demos")
+                  ? "active"
+                  : ""
+              }
+              aria-current={section === url ? "page" : undefined}
               onClick={() => setMobile(false)}
             >
               <Icon size={18} />
@@ -745,21 +909,26 @@ export function Workspace({
           ))}
         </nav>
         <div className="nav-bottom">
-          <div className="nav-caption">ADMINISTRARE</div>
           <nav className="nav">
             <Link
-              href="/settings/integrations"
-              className={path === "settings/integrations" ? "active" : ""}
-            >
-              <ShieldCheck size={18} />
-              Integrări
-            </Link>
-            <Link
+              prefetch={false}
               href="/settings"
-              className={path === "settings" ? "active" : ""}
+              className={
+                section === "settings" && path !== "settings/account"
+                  ? "active"
+                  : ""
+              }
             >
               <Settings size={18} />
-              Setări
+              Settings
+            </Link>
+            <Link
+              prefetch={false}
+              href="/settings/account"
+              className={path === "settings/account" ? "active" : ""}
+            >
+              <Users size={18} />
+              Account
             </Link>
           </nav>
         </div>
@@ -793,6 +962,7 @@ export function Workspace({
             <button
               className="icon-button mobile-menu"
               aria-label="Deschide meniul"
+              aria-expanded={mobile}
               onClick={() => setMobile(!mobile)}
             >
               <Menu size={20} />
@@ -831,6 +1001,7 @@ export function Workspace({
               <RefreshCw size={17} />
             </button>
             <Link
+              prefetch={false}
               href="/dashboard#notifications"
               aria-label="Notificări"
               className="icon-button"
@@ -845,49 +1016,63 @@ export function Workspace({
             </div>
           </div>
         </header>
+        {refreshProblem && (
+          <div className="gmail-refresh-problem" role="status">
+            {refreshProblem}{" "}
+            <button
+              type="button"
+              onClick={() =>
+                refresh().catch(() => tell("Actualizarea a eșuat."))
+              }
+            >
+              Reîncearcă
+            </button>
+          </div>
+        )}
+        {mobile && (
+          <button
+            className="mobile-backdrop"
+            aria-label="Închide meniul"
+            onClick={() => setMobile(false)}
+          />
+        )}
         <div className="content" key={path}>
           <div className="page-heading">
             <div>
-              <h1>{selectedLead ? selectedLead.company_name : title}</h1>
+              <h1>{title}</h1>
               <p>
                 {selectedLead
                   ? "Informații, conversații și următorul pas."
                   : section === "dashboard"
-                    ? "Tot ce contează pentru creșterea VoxaTech, într-un singur loc."
-                    : section === "leads"
-                      ? `${leads.length} prospecte · de la prima interacțiune la client.`
-                      : section === "campaigns"
-                        ? "Conversații relevante, la momentul potrivit."
-                        : section === "inbox"
-                          ? "Răspunsuri, ciorne și conversații care merită atenție."
-                          : section === "demos"
-                            ? "O experiență VoxaTech, personalizată pentru fiecare clinică."
-                            : section === "knowledge-base"
-                              ? "Sursa de adevăr pentru fiecare răspuns generat."
-                              : section === "analytics"
-                                ? "Înțelege ce funcționează în procesul de vânzare."
-                                : "Configurează spațiul de lucru și automatizările."}
+                    ? "Tot ce contează pentru creșterea Voxa, într-un singur loc."
+                    : section === "autopilot"
+                      ? "Alege clinici, stabilește limitele și pregătește primele ciorne."
+                      : section === "leads"
+                        ? `${leads.length} prospecte · de la prima interacțiune la client.`
+                        : section === "campaigns"
+                          ? "Conversații relevante, la momentul potrivit."
+                          : section === "inbox"
+                            ? "Răspunsuri, ciorne și conversații care merită atenție."
+                            : section === "demos"
+                              ? "O experiență Voxa, personalizată pentru fiecare clinică."
+                              : section === "knowledge-base"
+                                ? "Sursa de adevăr pentru fiecare răspuns generat."
+                                : section === "analytics"
+                                  ? "Înțelege ce funcționează în procesul de vânzare."
+                                  : "Configurează spațiul de lucru și automatizările."}
               </p>
             </div>
             <div className="header-actions">
-              {section === "dashboard" && (
+              {section === "leads" && (
                 <>
                   <Button
-                    variant="secondary"
-                    onClick={() => open("import")}
-                    disabled={!canEdit}
+                    variant="ghost"
+                    disabled={!manager}
+                    onClick={() => open("trash")}
                   >
-                    <Upload size={16} />
-                    Import CSV
+                    <Trash2 size={15} />
+                    Coș ({data.archived_leads?.length || 0})
                   </Button>
-                  <Button onClick={() => open("lead")} disabled={!canEdit}>
-                    <Plus size={17} />
-                    Adaugă prospect
-                  </Button>
-                </>
-              )}
-              {section === "leads" && !leadId && (
-                <>
                   <Button variant="secondary" onClick={exportCSV}>
                     <Download size={15} />
                     Export
@@ -898,22 +1083,13 @@ export function Workspace({
                     disabled={!canEdit}
                   >
                     <Upload size={15} />
-                    Import CSV
+                    Import Excel / CSV
                   </Button>
                   <Button onClick={() => open("lead")} disabled={!canEdit}>
                     <Plus size={16} />
                     Prospect nou
                   </Button>
                 </>
-              )}
-              {selectedLead && (
-                <Button
-                  variant="secondary"
-                  onClick={() => open("lead", selectedLead.id)}
-                  disabled={!canEdit}
-                >
-                  Editează prospectul
-                </Button>
               )}
               {section === "campaigns" && (
                 <Button disabled={!manager} onClick={() => open("campaign")}>
@@ -930,278 +1106,324 @@ export function Workspace({
             </div>
           </div>
           {data.delivery === "log" && (
-            <div className="notice">
-              <ShieldCheck size={17} />
-              <span>
-                Mod local activ. Trimiterile aprobate sunt înregistrate ca
-                simulări; niciun email nu părăsește aplicația.
+            <div className="delivery-note">
+              <ShieldCheck size={14} />
+              <span>Mod ciornă · niciun email extern</span>
+              <span className="sr-only">
+                Niciun email extern nu este trimis. Trimiterea rămâne în modul
+                log.
               </span>
-              <Link
-                href="/settings/integrations"
-                className="text-link"
-                style={{ marginLeft: "auto" }}
-              >
-                Vezi integrările{" "}
-                <ArrowUpRight size={12} style={{ display: "inline" }} />
-              </Link>
+              <Link href="/settings/integrations">Configurare email</Link>
             </div>
+          )}
+          {section === "settings" && (
+            <nav className="subnav" aria-label="Setări">
+              <Link href="/settings">General</Link>
+              <Link href="/settings/integrations">Integrări</Link>
+              <Link href="/knowledge-base">Bază de cunoștințe</Link>
+              <Link href="/settings/account">Account</Link>
+            </nav>
+          )}
+          {section === "demos" && (
+            <nav className="subnav">
+              <Link href="/campaigns">Campaigns</Link>
+              <Link href="/demos" aria-current="page">
+                Demo-uri
+              </Link>
+            </nav>
+          )}
+          {section === "autopilot" && (
+            <GmailAutopilotPanel
+              data={data}
+              manager={manager}
+              refresh={refresh}
+            />
           )}
           {section === "dashboard" && (
             <>
-              <div className="metrics">
-                <Metric
-                  label="Prospecte noi azi"
-                  value={
-                    leads.filter(
-                      (l) => bucharest(new Date(l.created_at)).date === today,
-                    ).length
-                  }
-                  note={`${leads.length} prospecte în total`}
-                  icon={Users}
-                />
-                <Metric
-                  label={
-                    data.delivery === "log"
-                      ? "Contactări simulate azi"
-                      : "Contactate azi"
-                  }
-                  value={
-                    new Set(
-                      data.messages
-                        .filter(
-                          (m) =>
-                            m.sent_at &&
-                            bucharest(new Date(m.sent_at)).date === today,
-                        )
-                        .map((m) => m.lead_id),
-                    ).size
-                  }
-                  note={
-                    data.delivery === "log"
-                      ? "Livrări locale, fără email extern"
-                      : "Conversații începute prin email"
-                  }
-                  icon={Send}
-                />
-                <Metric
-                  label="Răspunsuri primite"
-                  value={
-                    new Set(
-                      data.messages
-                        .filter((m) => m.direction === "inbound")
-                        .map((m) => m.lead_id),
-                    ).size
-                  }
-                  note="Prospecte care au răspuns"
-                  icon={Inbox}
-                />
-                <Metric
-                  label="Venit câștigat"
-                  value={money(revenue)}
-                  note={`${count("WON")} clienți câștigați · RON`}
-                  icon={Wallet}
-                />
-              </div>
-              <div className="grid-two">
-                <Panel
-                  title="Parcursul prospectelor"
-                  subtitle="Etapele atinse în parcursul de vânzare"
-                  action={
-                    <Link href="/analytics" className="text-link">
-                      Vezi analizele{" "}
-                      <ArrowUpRight size={13} style={{ display: "inline" }} />
-                    </Link>
-                  }
-                >
-                  <div className="funnel">
-                    {[
-                      ["Prospecte", leads.length],
-                      ["Contactate", contacted.size],
-                      ["Calificate", qualifiedReached.size],
-                      ["Cu demo", demoReached.size],
-                      ["Trial / checkout", trialReached.size],
-                      ["Clienți", count("WON")],
-                    ].map(([name, n], i) => (
-                      <div className="funnel-col" key={name}>
-                        <strong>{n}</strong>
-                        <div className="funnel-bar">
-                          <div
-                            style={{
-                              height: `${leads.length ? Math.max(3, (Number(n) / leads.length) * 100) : 3}%`,
-                              animationDelay: `${i * 65}ms`,
-                            }}
-                          />
-                        </div>
-                        {name}
-                      </div>
-                    ))}
-                  </div>
-                </Panel>
-                <Panel
-                  title="Necesită atenția ta"
-                  subtitle="Conversații pentru care un om face diferența"
-                  action={
-                    <span className="badge amber">
-                      {count("HUMAN_REQUIRED")}
-                    </span>
-                  }
-                >
-                  {leads
-                    .filter((l) => l.status === "HUMAN_REQUIRED")
-                    .slice(0, 4)
-                    .map((l) => (
-                      <Link
-                        className="list-row"
-                        href={`/leads/${l.id}`}
-                        key={l.id}
-                      >
-                        <div>
-                          <strong>{l.company_name}</strong>
-                          <small>
-                            {l.conversation_summary ||
-                              "Revizuiește conversația și alege următorul pas."}
-                          </small>
-                        </div>
-                        <ChevronRight size={16} />
-                      </Link>
-                    ))}
-                  {!count("HUMAN_REQUIRED") && (
-                    <Empty
-                      icon={CheckCircle2}
-                      title="Totul este la zi"
-                      text="Solicitările complexe vor fi trimise aici, pentru tine."
-                    />
-                  )}
-                </Panel>
-              </div>
-              <div className="grid-two section-gap">
-                <Panel
-                  title="Următoarele automatizări"
-                  subtitle="Acțiuni programate și procesate în siguranță"
-                  action={
-                    <Link className="text-link" href="/settings">
-                      Vezi toate
-                    </Link>
-                  }
-                >
-                  {data.automation_jobs
-                    .filter((j) => ["pending", "running"].includes(j.status))
-                    .slice(0, 5)
-                    .map((j) => (
-                      <div className="list-row" key={j.id}>
-                        <div className="row-main">
-                          <span className="mini-avatar">
-                            <Sparkles size={14} />
-                          </span>
-                          <div>
-                            <strong>{jobNames[j.kind]}</strong>
-                            <small>{leadName(j.lead_id)}</small>
-                          </div>
-                        </div>
-                        <small>{dateTime(j.next_action_at)}</small>
-                      </div>
-                    ))}
-                  {!data.automation_jobs.some((j) =>
-                    ["pending", "running"].includes(j.status),
-                  ) && (
-                    <Empty
-                      icon={Clock}
-                      title="Nicio acțiune în așteptare"
-                      text="Adaugă primul prospect pentru a începe analiza și pregătirea mesajelor."
-                    />
-                  )}
-                </Panel>
-                <Panel
-                  title="Activitate recentă"
-                  subtitle="Jurnalul echipei și al asistentului AI"
-                >
-                  {timeline(data.activities.slice(0, 5))}
-                </Panel>
-              </div>
-              <div className="grid-equal section-gap">
-                <Panel
-                  title="Configurarea clienților"
-                  subtitle={`${data.onboarding_records.length} formulare de onboarding`}
-                >
-                  {data.onboarding_records.slice(0, 4).map((o) => (
-                    <div className="list-row" key={o.id}>
-                      <div>
-                        <strong>{leadName(o.lead_id)}</strong>
-                        <small>{dateTime(o.created_at)}</small>
-                      </div>
-                      <Link
-                        className="text-link"
-                        href={`/onboarding/${o.share_token}`}
-                      >
-                        Deschide{" "}
+              <GmailAutopilotPanel
+                data={data}
+                manager={manager}
+                refresh={refresh}
+              />
+              <details className="disclosure dashboard-admin">
+                <summary>Administrare, notificări și date de evaluare</summary>
+                <p className="helper-text">
+                  Aceste detalii includ toate înregistrările, inclusiv
+                  demonstrațiile și simulările.
+                </p>
+                <div className="metrics">
+                  <Metric
+                    label="Prospecte noi azi"
+                    value={
+                      leads.filter(
+                        (l) => bucharest(new Date(l.created_at)).date === today,
+                      ).length
+                    }
+                    note={`${leads.length} prospecte în total`}
+                    icon={Users}
+                  />
+                  <Metric
+                    label={
+                      data.delivery === "log"
+                        ? "Contactări simulate azi"
+                        : "Contactate azi"
+                    }
+                    value={
+                      new Set(
+                        data.messages
+                          .filter(
+                            (m) =>
+                              m.sent_at &&
+                              bucharest(new Date(m.sent_at)).date === today,
+                          )
+                          .map((m) => m.lead_id),
+                      ).size
+                    }
+                    note={
+                      data.delivery === "log"
+                        ? "Livrări locale, fără email extern"
+                        : "Conversații începute prin email"
+                    }
+                    icon={Send}
+                  />
+                  <Metric
+                    label="Răspunsuri primite"
+                    value={
+                      new Set(
+                        data.messages
+                          .filter((m) => m.direction === "inbound")
+                          .map((m) => m.lead_id),
+                      ).size
+                    }
+                    note="Prospecte care au răspuns"
+                    icon={Inbox}
+                  />
+                  <Metric
+                    label="Venit câștigat"
+                    value={money(revenue)}
+                    note={`${count("WON")} clienți câștigați · RON`}
+                    icon={Wallet}
+                  />
+                </div>
+                <div className="grid-two">
+                  <Panel
+                    title="Parcursul prospectelor"
+                    subtitle="Etapele atinse în parcursul de vânzare"
+                    action={
+                      <Link href="/analytics" className="text-link">
+                        Vezi analizele{" "}
                         <ArrowUpRight size={13} style={{ display: "inline" }} />
                       </Link>
-                      <Badge value={o.status} />
+                    }
+                  >
+                    <div className="funnel">
+                      {[
+                        ["Prospecte", leads.length],
+                        ["Contactate", contacted.size],
+                        ["Calificate", qualifiedReached.size],
+                        ["Cu demo", demoReached.size],
+                        ["Trial / checkout", trialReached.size],
+                        ["Clienți", count("WON")],
+                      ].map(([name, n], i) => (
+                        <div className="funnel-col" key={name}>
+                          <strong>{n}</strong>
+                          <div className="funnel-bar">
+                            <div
+                              style={{
+                                height: `${leads.length ? Math.max(3, (Number(n) / leads.length) * 100) : 3}%`,
+                                animationDelay: `${i * 65}ms`,
+                              }}
+                            />
+                          </div>
+                          {name}
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                  {!data.onboarding_records.length && (
-                    <Empty
-                      icon={FileText}
-                      title="Pregătit pentru primul client"
-                      text="O plată confirmată creează automat formularul de configurare."
-                    />
+                  </Panel>
+                  <Panel
+                    title="Necesită atenția ta"
+                    subtitle="Conversații pentru care un om face diferența"
+                    action={
+                      <span className="badge amber">
+                        {count("HUMAN_REQUIRED")}
+                      </span>
+                    }
+                  >
+                    {leads
+                      .filter((l) => l.status === "HUMAN_REQUIRED")
+                      .slice(0, 4)
+                      .map((l) => (
+                        <Link
+                          prefetch={false}
+                          className="list-row"
+                          href={`/leads/${l.id}`}
+                          key={l.id}
+                        >
+                          <div>
+                            <strong>{l.company_name}</strong>
+                            <small>
+                              {l.conversation_summary ||
+                                "Revizuiește conversația și alege următorul pas."}
+                            </small>
+                          </div>
+                          <ChevronRight size={16} />
+                        </Link>
+                      ))}
+                    {!count("HUMAN_REQUIRED") && (
+                      <Empty
+                        icon={CheckCircle2}
+                        title="Totul este la zi"
+                        text="Solicitările complexe vor fi trimise aici, pentru tine."
+                      />
+                    )}
+                  </Panel>
+                </div>
+                <div className="grid-two section-gap">
+                  <Panel
+                    title="Următoarele automatizări"
+                    subtitle="Acțiuni programate și procesate în siguranță"
+                    action={
+                      <Link className="text-link" href="/settings">
+                        Vezi toate
+                      </Link>
+                    }
+                  >
+                    {data.automation_jobs
+                      .filter((j) => ["pending", "running"].includes(j.status))
+                      .slice(0, 5)
+                      .map((j) => (
+                        <div className="list-row" key={j.id}>
+                          <div className="row-main">
+                            <span className="mini-avatar">
+                              <Sparkles size={14} />
+                            </span>
+                            <div>
+                              <strong>{jobNames[j.kind]}</strong>
+                              <small>{leadName(j.lead_id)}</small>
+                            </div>
+                          </div>
+                          <small>{dateTime(j.next_action_at)}</small>
+                        </div>
+                      ))}
+                    {!data.automation_jobs.some((j) =>
+                      ["pending", "running"].includes(j.status),
+                    ) && (
+                      <Empty
+                        icon={Clock}
+                        title="Nicio acțiune în așteptare"
+                        text="Adaugă primul prospect pentru a începe analiza și pregătirea mesajelor."
+                      />
+                    )}
+                  </Panel>
+                  <Panel
+                    title="Activitate recentă"
+                    subtitle="Jurnalul echipei și al asistentului AI"
+                  >
+                    {timeline(data.activities.slice(0, 5))}
+                  </Panel>
+                </div>
+                <div className="grid-equal section-gap">
+                  <Panel
+                    title="Configurarea clienților"
+                    subtitle={`${data.onboarding_records.length} formulare de onboarding`}
+                  >
+                    {data.onboarding_records.slice(0, 4).map((o) => (
+                      <div className="list-row" key={o.id}>
+                        <div>
+                          <strong>{leadName(o.lead_id)}</strong>
+                          <small>{dateTime(o.created_at)}</small>
+                        </div>
+                        <Link
+                          prefetch={false}
+                          className="text-link"
+                          href={`/onboarding/${o.share_token}`}
+                        >
+                          Deschide{" "}
+                          <ArrowUpRight
+                            size={13}
+                            style={{ display: "inline" }}
+                          />
+                        </Link>
+                        <Badge value={o.status} />
+                      </div>
+                    ))}
+                    {!data.onboarding_records.length && (
+                      <Empty
+                        icon={FileText}
+                        title="Pregătit pentru primul client"
+                        text="O plată confirmată creează automat formularul de configurare."
+                      />
+                    )}
+                  </Panel>
+                  <Panel
+                    title="Pașii următori"
+                    subtitle="De la primul prospect la prima conversație"
+                  >
+                    <Link href="/leads" className="list-row">
+                      <div className="row-main">
+                        <span className="mini-avatar">1</span>
+                        <div>
+                          <strong>Adaugă prospectele potrivite</strong>
+                          <small>Import Excel / CSV sau adăugare manuală</small>
+                        </div>
+                      </div>
+                      <ChevronRight size={16} />
+                    </Link>
+                    <Link href="/settings/integrations" className="list-row">
+                      <div className="row-main">
+                        <span className="mini-avatar">2</span>
+                        <div>
+                          <strong>Configurează serviciile</strong>
+                          <small>AI, email și voci pentru demonstrații</small>
+                        </div>
+                      </div>
+                      <ChevronRight size={16} />
+                    </Link>
+                    <Link href="/campaigns" className="list-row">
+                      <div className="row-main">
+                        <span className="mini-avatar">3</span>
+                        <div>
+                          <strong>Pregătește prima campanie</strong>
+                          <small>
+                            Revizuiește mesajele înainte de activare
+                          </small>
+                        </div>
+                      </div>
+                      <ChevronRight size={16} />
+                    </Link>
+                  </Panel>
+                </div>
+                <section id="notifications" className="section-gap">
+                  <h2 className="section-title">
+                    Notificări și rezumat zilnic
+                  </h2>
+                  {data.notifications.length ? (
+                    data.notifications.slice(0, 5).map((n) => (
+                      <div className="notification" key={n.id}>
+                        <strong>{n.title}</strong>
+                        <p>{n.body}</p>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="muted">
+                      Rezumatul zilnic apare la 18:30, ora Bucureștiului.
+                    </p>
                   )}
-                </Panel>
-                <Panel
-                  title="Pașii următori"
-                  subtitle="De la primul prospect la prima conversație"
-                >
-                  <Link href="/leads" className="list-row">
-                    <div className="row-main">
-                      <span className="mini-avatar">1</span>
-                      <div>
-                        <strong>Adaugă prospectele potrivite</strong>
-                        <small>Import CSV sau adăugare manuală</small>
-                      </div>
-                    </div>
-                    <ChevronRight size={16} />
-                  </Link>
-                  <Link href="/settings/integrations" className="list-row">
-                    <div className="row-main">
-                      <span className="mini-avatar">2</span>
-                      <div>
-                        <strong>Configurează serviciile</strong>
-                        <small>AI, email și voci pentru demonstrații</small>
-                      </div>
-                    </div>
-                    <ChevronRight size={16} />
-                  </Link>
-                  <Link href="/campaigns" className="list-row">
-                    <div className="row-main">
-                      <span className="mini-avatar">3</span>
-                      <div>
-                        <strong>Pregătește prima campanie</strong>
-                        <small>Revizuiește mesajele înainte de activare</small>
-                      </div>
-                    </div>
-                    <ChevronRight size={16} />
-                  </Link>
-                </Panel>
-              </div>
-              <section id="notifications" className="section-gap">
-                <h2 className="section-title">Notificări și rezumat zilnic</h2>
-                {data.notifications.length ? (
-                  data.notifications.slice(0, 5).map((n) => (
-                    <div className="notification" key={n.id}>
-                      <strong>{n.title}</strong>
-                      <p>{n.body}</p>
-                    </div>
-                  ))
-                ) : (
-                  <p className="muted">
-                    Rezumatul zilnic apare la 18:30, ora Bucureștiului.
-                  </p>
-                )}
-              </section>
+                </section>
+              </details>
             </>
           )}
-          {section === "leads" && !leadId && (
+          {section === "leads" && (
             <>
+              <LeadListsPanel
+                data={data}
+                activeId={filters.lead_list_id || ""}
+                onSelect={(id) => filter("lead_list_id", id)}
+                selectedIds={selected}
+                act={act}
+                canEdit={canEdit}
+              />
               <div className="toolbar">
                 <div className="search">
                   <Search size={17} />
@@ -1219,84 +1441,87 @@ export function Workspace({
                   {filtered.length} rezultate
                 </span>
               </div>
-              <div className="filters">
-                <select
-                  aria-label="Status"
-                  value={filters.status || ""}
-                  onChange={(e) => filter("status", e.target.value)}
-                >
-                  <option value="">Toate statusurile</option>
-                  {statuses.map((s) => (
-                    <option value={s} key={s}>
-                      {statusLabels[s]}
-                    </option>
-                  ))}
-                </select>
-                {(["niche", "city", "source"] as const).map((key) => (
+              <details className="disclosure filter-disclosure">
+                <summary>Mai multe filtre</summary>
+                <div className="filters">
                   <select
-                    key={key}
-                    aria-label={key}
-                    value={filters[key] || ""}
-                    onChange={(e) => filter(key, e.target.value)}
+                    aria-label="Status"
+                    value={filters.status || ""}
+                    onChange={(e) => filter("status", e.target.value)}
                   >
-                    <option value="">
-                      {key === "niche"
-                        ? "Toate specialitățile"
-                        : key === "city"
-                          ? "Toate orașele"
-                          : "Toate sursele"}
-                    </option>
-                    {options(key).map((o) => (
-                      <option key={o}>{o}</option>
+                    <option value="">Toate statusurile</option>
+                    {statuses.map((s) => (
+                      <option value={s} key={s}>
+                        {statusLabels[s]}
+                      </option>
                     ))}
                   </select>
-                ))}
-                <select
-                  aria-label="Scor minim"
-                  value={filters.score || ""}
-                  onChange={(e) => filter("score", e.target.value)}
-                >
-                  <option value="">Orice scor</option>
-                  <option value="50">50+ puncte</option>
-                  <option value="80">80+ puncte</option>
-                </select>
-                <select
-                  aria-label="Campanie"
-                  value={filters.campaign || ""}
-                  onChange={(e) => filter("campaign", e.target.value)}
-                >
-                  <option value="">Toate campaniile</option>
-                  {data.campaigns.map((c) => (
-                    <option value={c.id} key={c.id}>
-                      {c.name}
-                    </option>
+                  {(["niche", "city", "source"] as const).map((key) => (
+                    <select
+                      key={key}
+                      aria-label={key}
+                      value={filters[key] || ""}
+                      onChange={(e) => filter(key, e.target.value)}
+                    >
+                      <option value="">
+                        {key === "niche"
+                          ? "Toate specialitățile"
+                          : key === "city"
+                            ? "Toate orașele"
+                            : "Toate sursele"}
+                      </option>
+                      {options(key).map((o) => (
+                        <option key={o}>{o}</option>
+                      ))}
+                    </select>
                   ))}
-                </select>
-                <select
-                  aria-label="Responsabil"
-                  value={filters.owner || ""}
-                  onChange={(e) => filter("owner", e.target.value)}
-                >
-                  <option value="">Toți responsabilii</option>
-                  {data.profiles.map((p) => (
-                    <option value={p.id} key={p.id}>
-                      {p.full_name || p.id.slice(0, 8)}
-                    </option>
-                  ))}
-                </select>
-                {Object.values(filters).some(Boolean) && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => {
-                      setFilters({});
-                      setPage(0);
-                    }}
+                  <select
+                    aria-label="Scor minim"
+                    value={filters.score || ""}
+                    onChange={(e) => filter("score", e.target.value)}
                   >
-                    Resetează filtrele
-                  </Button>
-                )}
-              </div>
+                    <option value="">Orice scor</option>
+                    <option value="50">50+ puncte</option>
+                    <option value="80">80+ puncte</option>
+                  </select>
+                  <select
+                    aria-label="Campanie"
+                    value={filters.campaign || ""}
+                    onChange={(e) => filter("campaign", e.target.value)}
+                  >
+                    <option value="">Toate campaniile</option>
+                    {data.campaigns.map((c) => (
+                      <option value={c.id} key={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    aria-label="Responsabil"
+                    value={filters.owner || ""}
+                    onChange={(e) => filter("owner", e.target.value)}
+                  >
+                    <option value="">Toți responsabilii</option>
+                    {data.profiles.map((p) => (
+                      <option value={p.id} key={p.id}>
+                        {p.full_name || p.id.slice(0, 8)}
+                      </option>
+                    ))}
+                  </select>
+                  {Object.values(filters).some(Boolean) && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => {
+                        setFilters({});
+                        setPage(0);
+                      }}
+                    >
+                      Resetează filtrele
+                    </Button>
+                  )}
+                </div>
+              </details>
               {selected.length > 0 && (
                 <div className="selection">
                   <strong>{selected.length} selectate</strong>
@@ -1396,6 +1621,15 @@ export function Workspace({
                   >
                     Pregătește pentru campanie
                   </Button>
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    disabled={!manager || busy}
+                    onClick={() => requestDelete(selected)}
+                  >
+                    <Trash2 size={14} />
+                    Șterge selectate
+                  </Button>
                 </div>
               )}
               <div className="panel">
@@ -1435,12 +1669,12 @@ export function Workspace({
                         />
                       </th>
                       <th>Companie</th>
-                      <th>Specialitate</th>
-                      <th>Oraș</th>
-                      <th>Scor AI</th>
+                      <th>Contact</th>
+                      <th>Industrie</th>
                       <th>Status</th>
-                      <th>Ultimul contact</th>
-                      <th />
+                      <th>Scor lead</th>
+                      <th>Ultima activitate</th>
+                      <th>Acțiuni</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1461,13 +1695,40 @@ export function Workspace({
                           />
                         </td>
                         <td>
-                          <Link href={`/leads/${l.id}`}>{l.company_name}</Link>
-                          <small>
-                            {l.email || l.website || "Contact de completat"}
-                          </small>
+                          <button
+                            className="company-link"
+                            onClick={() => showLead(l.id)}
+                          >
+                            {l.company_name}
+                          </button>
+                          <small>{l.city || "Locație necunoscută"}</small>
+                          {/dry.run|controlled.test/i.test(l.source || "") ? (
+                            <small className="data-label">Demo</small>
+                          ) : l.source === "evaluare-controlata" ? (
+                            <small className="data-label">
+                              Evaluare controlată
+                            </small>
+                          ) : null}
+                        </td>
+                        <td>
+                          <span>{l.contact_name || "Contact necunoscut"}</span>
+                          <small>{l.email || l.phone || "De completat"}</small>
                         </td>
                         <td>{l.niche || "Necunoscută"}</td>
-                        <td>{l.city || "—"}</td>
+                        <td>
+                          <Badge
+                            value={
+                              l.status === "REPLIED" &&
+                              data.messages.find(
+                                (m) =>
+                                  m.lead_id === l.id &&
+                                  m.direction === "inbound",
+                              )?.classification === "positive"
+                                ? "Interested"
+                                : l.status
+                            }
+                          />
+                        </td>
                         <td>
                           <span className="score">
                             <span className="score-line">
@@ -1479,20 +1740,19 @@ export function Workspace({
                           </span>
                         </td>
                         <td>
-                          <Badge value={l.status} />
+                          {dateTime(
+                            data.activities.find((a) => a.lead_id === l.id)
+                              ?.created_at || l.updated_at,
+                          )}
                         </td>
                         <td>
-                          {l.last_contact_at
-                            ? dateTime(l.last_contact_at)
-                            : "Necontactat"}
-                        </td>
-                        <td>
-                          <Link
-                            href={`/leads/${l.id}`}
+                          <button
+                            className="icon-button"
+                            onClick={() => showLead(l.id)}
                             aria-label={`Deschide ${l.company_name}`}
                           >
                             <ChevronRight size={16} />
-                          </Link>
+                          </button>
                         </td>
                       </tr>
                     ))}
@@ -1508,7 +1768,7 @@ export function Workspace({
                     text={
                       leads.length
                         ? "Încearcă alte filtre sau un alt termen de căutare."
-                        : "Adaugă o clinică sau importă un CSV. Datele vor fi analizate și organizate aici."
+                        : "Adaugă o clinică sau importă un fișier Excel sau CSV. Datele vor fi analizate și organizate aici."
                     }
                   >
                     <Button
@@ -1553,10 +1813,28 @@ export function Workspace({
             </>
           )}
           {selectedLead && (
-            <>
-              <Link href="/leads" className="text-link">
-                ← Înapoi la prospecte
-              </Link>
+            <Drawer
+              open={!!selectedLead}
+              onClose={closeLead}
+              title={selectedLead.company_name}
+            >
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={!canEdit}
+                onClick={() => open("lead", selectedLead.id)}
+              >
+                Editează leadul
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={!manager || busy}
+                onClick={() => requestDelete([selectedLead.id])}
+              >
+                <Trash2 size={14} />
+                Șterge leadul
+              </Button>
               <div className="detail-grid section-gap">
                 <section className="panel detail-profile">
                   <div className="mini-avatar">
@@ -1569,50 +1847,54 @@ export function Workspace({
                       Scor {selectedLead.lead_score ?? "—"}/100
                     </span>
                   </div>
-                  {[
-                    ["Specialitate", selectedLead.niche],
-                    [
-                      "Oraș / țară",
-                      [selectedLead.city, selectedLead.country]
-                        .filter(Boolean)
-                        .join(", "),
-                    ],
-                    ["Email", selectedLead.email],
-                    ["Telefon", selectedLead.phone],
-                    ["Website", selectedLead.website],
-                    ["Persoană de contact", selectedLead.contact_name],
-                    [
-                      "Responsabil",
-                      data.profiles.find((p) => p.id === selectedLead.owner_id)
-                        ?.full_name,
-                    ],
-                    ["Sursă", selectedLead.source],
-                    [
-                      "Evaluare Google",
-                      selectedLead.google_rating
-                        ? `${selectedLead.google_rating} · ${selectedLead.review_count || 0} recenzii`
-                        : null,
-                    ],
-                    [
-                      "Program",
-                      typeof selectedLead.opening_hours === "object" &&
-                      selectedLead.opening_hours
-                        ? String(
-                            jsonObject(selectedLead.opening_hours).text ||
-                              "Necunoscut",
-                          )
-                        : null,
-                    ],
-                    [
-                      "Următoarea acțiune",
-                      dateTime(selectedLead.next_action_at),
-                    ],
-                  ].map(([name, value]) => (
-                    <dl className="detail-pair" key={name}>
-                      <dt>{name}</dt>
-                      <dd>{value || "Necunoscut"}</dd>
-                    </dl>
-                  ))}
+                  <details className="disclosure">
+                    <summary>Date de contact și profil</summary>
+                    {[
+                      ["Specialitate", selectedLead.niche],
+                      [
+                        "Oraș / țară",
+                        [selectedLead.city, selectedLead.country]
+                          .filter(Boolean)
+                          .join(", "),
+                      ],
+                      ["Email", selectedLead.email],
+                      ["Telefon", selectedLead.phone],
+                      ["Website", selectedLead.website],
+                      ["Persoană de contact", selectedLead.contact_name],
+                      [
+                        "Responsabil",
+                        data.profiles.find(
+                          (p) => p.id === selectedLead.owner_id,
+                        )?.full_name,
+                      ],
+                      ["Sursă", selectedLead.source],
+                      [
+                        "Evaluare Google",
+                        selectedLead.google_rating
+                          ? `${selectedLead.google_rating} · ${selectedLead.review_count || 0} recenzii`
+                          : null,
+                      ],
+                      [
+                        "Program",
+                        typeof selectedLead.opening_hours === "object" &&
+                        selectedLead.opening_hours
+                          ? String(
+                              jsonObject(selectedLead.opening_hours).text ||
+                                "Necunoscut",
+                            )
+                          : null,
+                      ],
+                      [
+                        "Următoarea acțiune",
+                        dateTime(selectedLead.next_action_at),
+                      ],
+                    ].map(([name, value]) => (
+                      <dl className="detail-pair" key={name}>
+                        <dt>{name}</dt>
+                        <dd>{value || "Necunoscut"}</dd>
+                      </dl>
+                    ))}
+                  </details>
                 </section>
                 <div>
                   <div className="tabs">
@@ -1688,13 +1970,18 @@ export function Workspace({
                           <Panel title="Evaluare controlată pentru revizuire">
                             <div className="panel-body">
                               <p className="copy">
-                                {String(details.fit || "Evaluare indisponibilă.")}
+                                {String(
+                                  details.fit || "Evaluare indisponibilă.",
+                                )}
                               </p>
                               <div className="pill-row section-gap">
                                 <span className="badge purple">Varianta A</span>
                                 <span className="badge">Varianta B</span>
                                 <span className="badge green">
-                                  ${Number(details.estimated_cost_usd || 0).toFixed(6)}
+                                  $
+                                  {Number(
+                                    details.estimated_cost_usd || 0,
+                                  ).toFixed(6)}
                                 </span>
                                 <span className="badge">
                                   {Number(details.total_tokens || 0)} tokenuri
@@ -1702,7 +1989,9 @@ export function Workspace({
                               </div>
                               {flags.length ? (
                                 <div className="callout section-gap">
-                                  <strong>De verificat înainte de contactare</strong>
+                                  <strong>
+                                    De verificat înainte de contactare
+                                  </strong>
                                   {flags.map((flag) => (
                                     <p className="copy" key={flag}>
                                       {flag}
@@ -1737,6 +2026,7 @@ export function Workspace({
                         >
                           <textarea
                             name="notes"
+                            aria-label="Notițe interne"
                             defaultValue={selectedLead.notes}
                             placeholder="Context util pentru echipă…"
                           />
@@ -1826,14 +2116,6 @@ export function Workspace({
                         />
                       )}
                       {leadActions(selectedLead.id)}
-                      <Button
-                        variant="secondary"
-                        className="section-gap"
-                        disabled={!canEdit || !data.providers.stripe}
-                        onClick={() => act("checkout", { id: selectedLead.id })}
-                      >
-                        Pregătește link de plată
-                      </Button>
                     </>
                   )}
                   {tab === "activity" && (
@@ -1874,6 +2156,7 @@ export function Workspace({
                             <h2>Demo pentru {selectedLead.company_name}</h2>
                             <p className="muted">{dateTime(d.created_at)}</p>
                             <Link
+                              prefetch={false}
                               className="button secondary section-gap"
                               href={`/demo/${d.share_token}`}
                               target="_blank"
@@ -1887,7 +2170,7 @@ export function Workspace({
                   )}
                 </div>
               </div>
-            </>
+            </Drawer>
           )}
           {section === "leads" && leadId && !selectedLead && (
             <Empty
@@ -1897,303 +2180,450 @@ export function Workspace({
           )}
           {section === "campaigns" && !campaignReviewId && (
             <>
-              <div className="grid-three">
-                {data.campaigns.map((c) => (
-                  <div className="panel campaign-card" key={c.id}>
-                    <div
-                      className="actions"
-                      style={{ justifyContent: "space-between" }}
-                    >
-                      <Badge value={c.status} />
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        aria-label={`Editează ${c.name}`}
-                        disabled={!manager}
-                        onClick={() => open("campaign", c.id)}
-                      >
-                        <Ellipsis size={18} />
-                      </Button>
+              <nav className="tabs" aria-label="Outreach">
+                <button
+                  className={`tab ${outreachTab === "campaigns" ? "active" : ""}`}
+                  aria-pressed={outreachTab === "campaigns"}
+                  onClick={() => setOutreachTab("campaigns")}
+                >
+                  Campaigns
+                </button>
+                <button
+                  className={`tab ${outreachTab === "sequences" ? "active" : ""}`}
+                  aria-pressed={outreachTab === "sequences"}
+                  onClick={() => setOutreachTab("sequences")}
+                >
+                  Sequences
+                </button>
+                <Link className="tab" href="/inbox">
+                  Inbox
+                </Link>
+                <Link className="tab" href="/demos">
+                  Demo-uri
+                </Link>
+              </nav>
+              {outreachTab === "campaigns" ? (
+                <section className="surface campaign-list">
+                  <div className="section-heading">
+                    <div>
+                      <h2>Campaniile tale</h2>
+                      <p>
+                        Audiență, mesaje și revizuire, într-un singur parcurs.
+                      </p>
                     </div>
-                    <h2>{c.name}</h2>
-                    <p className="muted" style={{ fontSize: 13 }}>
-                      {c.niche || "Toate specialitățile"} ·{" "}
-                      {c.cities.join(", ") || "Toate orașele"}
-                    </p>
-                    <div className="campaign-stats">
-                      <div>
-                        <strong>
+                    <span className="muted">
+                      {data.campaigns.length} campanii
+                    </span>
+                  </div>
+                  {data.campaigns.map((c) => (
+                    <div className="campaign-row" key={c.id}>
+                      <span className="campaign-icon">
+                        <Send size={18} />
+                      </span>
+                      <div className="campaign-name">
+                        <h3>{c.name}</h3>
+                        <p>
                           {
                             data.campaign_leads.filter(
                               (l) => l.campaign_id === c.id,
                             ).length
-                          }
-                        </strong>
-                        <small>Prospecte</small>
-                      </div>
-                      <div>
-                        <strong>
-                          {
-                            data.messages.filter(
-                              (m) => m.campaign_id === c.id && m.sent_at,
-                            ).length
-                          }
-                        </strong>
-                        <small>
-                          {data.delivery === "log"
-                            ? "Trimiteri simulate"
-                            : "Mesaje trimise"}
-                        </small>
-                      </div>
-                      <div>
-                        <strong>{c.daily_cap}</strong>
-                        <small>Limită zilnică</small>
-                      </div>
-                    </div>
-                    <p className="muted" style={{ fontSize: 13 }}>
-                      <Clock
-                        size={13}
-                        style={{ display: "inline", marginRight: 5 }}
-                      />
-                      {c.window_start.slice(0, 5)}–{c.window_end.slice(0, 5)} ·
-                      București
-                    </p>
-                    <p className="muted" style={{ fontSize: 13, marginTop: 5 }}>
-                      {c.mode === "automatic"
-                        ? "Automată"
-                        : "Aprobare înainte de trimitere"}{" "}
-                      · maximum 2 reveniri
-                    </p>
-                    {c.name === "Evaluare controlată · revizuire ciorne" && (
-                      <div className="callout section-gap">
-                        <strong>Coada de revizuire</strong>
-                        <p className="copy">
-                          {
-                            reviewActivities(c.id).length
-                          }
-                          /
-                          {
-                            data.campaign_leads.filter(
-                              (item) => item.campaign_id === c.id,
-                            ).length
                           }{" "}
-                          evaluări complete ·{" "}
-                          {
-                            data.messages.filter(
-                              (message) => {
+                          leaduri · {c.daily_cap}/zi
+                        </p>
+                      </div>
+                      <Badge value={c.status} />
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={!manager}
+                        onClick={() => open("campaign", c.id)}
+                      >
+                        Editează
+                      </Button>
+                      <Link
+                        prefetch={false}
+                        className="button small secondary"
+                        href={`/campaigns/${c.id}/review`}
+                      >
+                        Revizuiește
+                        <ChevronRight size={14} />
+                      </Link>
+                    </div>
+                  ))}
+                  {!data.campaigns.length && (
+                    <Empty
+                      icon={Send}
+                      title="Prima campanie începe cu leadurile tale"
+                      text="Alege audiența, pregătește mesajul și verifică înainte de lansare."
+                    >
+                      <Button
+                        disabled={!manager}
+                        onClick={() => open("campaign")}
+                      >
+                        Creează o campanie
+                      </Button>
+                    </Empty>
+                  )}
+                </section>
+              ) : (
+                <section className="surface sequence-list">
+                  <div className="section-heading">
+                    <div>
+                      <h2>Secvențele campaniilor</h2>
+                      <p>
+                        Mesaj inițial și maximum două reveniri. Configurația
+                        existentă este păstrată.
+                      </p>
+                    </div>
+                  </div>
+                  {data.campaigns.map((c) => (
+                    <div className="sequence-row" key={c.id}>
+                      <div className="section-heading">
+                        <h3>{c.name}</h3>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          disabled={!manager}
+                          onClick={() => {
+                            setEdit(c.id);
+                            setCampaignStep(2);
+                            setModal("campaign");
+                          }}
+                        >
+                          Editează secvența
+                        </Button>
+                      </div>
+                      <ol className="sequence-track">
+                        <li>
+                          <span>1</span>Primul mesaj
+                        </li>
+                        <li>
+                          <span>2</span>Revenire 1
+                        </li>
+                        <li>
+                          <span>3</span>Revenire 2
+                        </li>
+                      </ol>
+                      <details className="disclosure">
+                        <summary>Vezi mesajele secvenței</summary>
+                        <div className="sequence-copy">
+                          <p>{c.first_message || "Mesaj neconfigurat"}</p>
+                          <p>{c.follow_up_1 || "Revenire neconfigurată"}</p>
+                          <p>{c.follow_up_2 || "Revenire neconfigurată"}</p>
+                        </div>
+                      </details>
+                    </div>
+                  ))}
+                  {!data.campaigns.length && (
+                    <Empty
+                      title="Încă nu ai secvențe"
+                      text="Creează o campanie și configurează pașii mesajelor."
+                    />
+                  )}
+                </section>
+              )}
+              <details className="disclosure">
+                <summary>Administrare avansată și evaluări controlate</summary>
+                <div className="grid-three">
+                  {data.campaigns.map((c) => (
+                    <div className="panel campaign-card" key={c.id}>
+                      <div
+                        className="actions"
+                        style={{ justifyContent: "space-between" }}
+                      >
+                        <Badge value={c.status} />
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`Editează ${c.name}`}
+                          disabled={!manager}
+                          onClick={() => open("campaign", c.id)}
+                        >
+                          <Ellipsis size={18} />
+                        </Button>
+                      </div>
+                      <h2>{c.name}</h2>
+                      <p className="muted" style={{ fontSize: 13 }}>
+                        {c.niche || "Toate specialitățile"} ·{" "}
+                        {c.cities.join(", ") || "Toate orașele"}
+                      </p>
+                      <div className="campaign-stats">
+                        <div>
+                          <strong>
+                            {
+                              data.campaign_leads.filter(
+                                (l) => l.campaign_id === c.id,
+                              ).length
+                            }
+                          </strong>
+                          <small>Prospecte</small>
+                        </div>
+                        <div>
+                          <strong>
+                            {
+                              data.messages.filter(
+                                (m) => m.campaign_id === c.id && m.sent_at,
+                              ).length
+                            }
+                          </strong>
+                          <small>
+                            {data.delivery === "log"
+                              ? "Trimiteri simulate"
+                              : "Mesaje trimise"}
+                          </small>
+                        </div>
+                        <div>
+                          <strong>{c.daily_cap}</strong>
+                          <small>Limită zilnică</small>
+                        </div>
+                      </div>
+                      <p className="muted" style={{ fontSize: 13 }}>
+                        <Clock
+                          size={13}
+                          style={{ display: "inline", marginRight: 5 }}
+                        />
+                        {c.window_start.slice(0, 5)}–{c.window_end.slice(0, 5)}{" "}
+                        · București
+                      </p>
+                      <p
+                        className="muted"
+                        style={{ fontSize: 13, marginTop: 5 }}
+                      >
+                        {c.mode === "automatic"
+                          ? "Automată"
+                          : "Aprobare înainte de trimitere"}{" "}
+                        · maximum 2 reveniri
+                      </p>
+                      {c.name === "Evaluare controlată · revizuire ciorne" && (
+                        <div className="callout section-gap">
+                          <strong>Coada de revizuire</strong>
+                          <p className="copy">
+                            {reviewActivities(c.id).length}/
+                            {
+                              data.campaign_leads.filter(
+                                (item) => item.campaign_id === c.id,
+                              ).length
+                            }{" "}
+                            evaluări complete ·{" "}
+                            {
+                              data.messages.filter((message) => {
                                 const metadata = jsonObject(message.metadata);
                                 return (
                                   message.campaign_id === c.id &&
                                   message.status === "draft" &&
                                   metadata.copy_version === outreachCopyVersion
                                 );
-                              },
-                            ).length
-                          }{" "}
-                          ciorne · cost AI total estimat ${reviewActivities(c.id)
-                            .reduce(
-                              (sum, activity) =>
-                                sum +
-                                Number(
-                                  jsonObject(activity.details)
-                                    .estimated_cost_usd || 0,
-                                ),
-                              0,
-                            )
-                            .toFixed(6)}
-                        </p>
-                        <div className="pill-row section-gap">
-                          {data.campaign_leads
-                            .filter((item) => item.campaign_id === c.id)
-                            .slice(0, 10)
-                            .map((item) => (
-                              <Link
-                                className="badge"
-                                href={`/leads/${item.lead_id}`}
-                                key={item.id}
-                              >
-                                {leadName(item.lead_id)}
-                              </Link>
-                            ))}
+                              }).length
+                            }{" "}
+                            ciorne · cost AI total estimat $
+                            {reviewActivities(c.id)
+                              .reduce(
+                                (sum, activity) =>
+                                  sum +
+                                  Number(
+                                    jsonObject(activity.details)
+                                      .estimated_cost_usd || 0,
+                                  ),
+                                0,
+                              )
+                              .toFixed(6)}
+                          </p>
+                          <div className="pill-row section-gap">
+                            {data.campaign_leads
+                              .filter((item) => item.campaign_id === c.id)
+                              .slice(0, 10)
+                              .map((item) => (
+                                <Link
+                                  prefetch={false}
+                                  className="badge"
+                                  href={`/leads/${item.lead_id}`}
+                                  key={item.id}
+                                >
+                                  {leadName(item.lead_id)}
+                                </Link>
+                              ))}
+                          </div>
                         </div>
-                      </div>
-                    )}
-                    <div className="actions section-gap">
-                      <Button asChild size="sm" variant="secondary">
-                        <Link href={`/campaigns/${c.id}/review`}>
-                          <FileText size={13} /> Review &amp; Launch
-                        </Link>
-                      </Button>
-                      {c.status === "active" ? (
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          disabled={!manager}
-                          onClick={() =>
-                            act("campaign_status", {
-                              id: c.id,
-                              status: "paused",
-                            })
-                          }
-                        >
-                          <Pause size={13} />
-                          Pauză
+                      )}
+                      <div className="actions section-gap">
+                        <Button asChild size="sm" variant="secondary">
+                          <Link href={`/campaigns/${c.id}/review`}>
+                            <FileText size={13} /> Review &amp; Launch
+                          </Link>
                         </Button>
-                      ) : (
+                        {c.status === "active" ? (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            disabled={!manager}
+                            onClick={() =>
+                              act("campaign_status", {
+                                id: c.id,
+                                status: "paused",
+                              })
+                            }
+                          >
+                            <Pause size={13} />
+                            Pauză
+                          </Button>
+                        ) : (
+                          <Button
+                            size="sm"
+                            disabled={
+                              !manager ||
+                              c.status === "archived" ||
+                              c.name ===
+                                "Evaluare controlată · revizuire ciorne"
+                            }
+                            onClick={() =>
+                              setConfirm({
+                                title: "Activează campania",
+                                text:
+                                  data.delivery === "log"
+                                    ? "Campania va procesa prospectele în modul local, fără emailuri reale."
+                                    : "Campania va putea trimite emailuri reale în limitele configurate. Confirmă identitatea expeditorului și mesajele.",
+                                run: () =>
+                                  act("campaign_status", {
+                                    id: c.id,
+                                    status: "active",
+                                  }),
+                              })
+                            }
+                          >
+                            <Play size={13} />
+                            Activează
+                          </Button>
+                        )}
                         <Button
+                          variant="ghost"
                           size="sm"
-                          disabled={
-                            !manager ||
-                            c.status === "archived" ||
-                            c.name ===
-                              "Evaluare controlată · revizuire ciorne"
-                          }
+                          disabled={!manager || c.status === "archived"}
                           onClick={() =>
                             setConfirm({
-                              title: "Activează campania",
-                              text:
-                                data.delivery === "log"
-                                  ? "Campania va procesa prospectele în modul local, fără emailuri reale."
-                                  : "Campania va putea trimite emailuri reale în limitele configurate. Confirmă identitatea expeditorului și mesajele.",
+                              title: "Arhivează campania",
+                              text: "Campania nu va mai trimite mesaje. Istoricul rămâne disponibil.",
                               run: () =>
                                 act("campaign_status", {
                                   id: c.id,
-                                  status: "active",
+                                  status: "archived",
                                 }),
                             })
                           }
                         >
-                          <Play size={13} />
-                          Activează
+                          Arhivează
                         </Button>
-                      )}
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        disabled={!manager || c.status === "archived"}
-                        onClick={() =>
-                          setConfirm({
-                            title: "Arhivează campania",
-                            text: "Campania nu va mai trimite mesaje. Istoricul rămâne disponibil.",
-                            run: () =>
-                              act("campaign_status", {
-                                id: c.id,
-                                status: "archived",
-                              }),
-                          })
-                        }
-                      >
-                        Arhivează
-                      </Button>
+                      </div>
                     </div>
-                  </div>
-                ))}
-              </div>
-              {data.campaigns
-                .filter(
-                  (campaign) =>
-                    campaign.name ===
-                    "Evaluare controlată · revizuire ciorne",
-                )
-                .map((campaign) => (
-                  <Panel
-                    key={`${campaign.id}-review`}
-                    title="Revizuire mesaje · Varianta B"
-                    subtitle="Stilul principal pain-first. Toate mesajele rămân ciorne locale."
-                  >
-                    <Table>
-                      <thead>
-                        <tr>
-                          <th>Prospect</th>
-                          <th>Fapt folosit</th>
-                          <th>Scor</th>
-                          <th>Subiect</th>
-                          <th>Ciornă</th>
-                          <th>Cost estimat</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {reviewRows(campaign.id).map(
-                          ({ lead, draft, activity }) => {
-                            const metadata = jsonObject(draft?.metadata || null);
-                            const details = jsonObject(
-                              activity?.details || null,
-                            );
-                            return (
-                              <tr key={lead?.id || draft?.lead_id}>
-                                <td>
-                                  {lead ? (
-                                    <Link href={`/leads/${lead.id}`}>
-                                      {lead.company_name}
-                                    </Link>
-                                  ) : (
-                                    "Prospect indisponibil"
-                                  )}
-                                </td>
-                                <td
-                                  style={{
-                                    whiteSpace: "normal",
-                                    minWidth: 190,
-                                    maxWidth: 280,
-                                  }}
-                                >
-                                  {String(
-                                    metadata.fact_used ||
-                                      "Niciun fapt specific folosit",
-                                  )}
-                                </td>
-                                <td>{lead?.lead_score ?? "—"}/100</td>
-                                <td
-                                  style={{
-                                    whiteSpace: "normal",
-                                    minWidth: 210,
-                                  }}
-                                >
-                                  {draft?.subject || "În așteptare"}
-                                </td>
-                                <td
-                                  style={{
-                                    whiteSpace: "pre-wrap",
-                                    minWidth: 360,
-                                    maxWidth: 520,
-                                    lineHeight: 1.55,
-                                  }}
-                                >
-                                  {draft?.body ||
-                                    "Se va genera când Gemini permite reluarea."}
-                                </td>
-                                <td>
-                                  {activity
-                                    ? `$${Number(
-                                        details.estimated_cost_usd || 0,
-                                      ).toFixed(6)}`
-                                    : "—"}
-                                </td>
-                              </tr>
-                            );
-                          },
-                        )}
-                      </tbody>
-                    </Table>
-                  </Panel>
-                ))}
-              {!data.campaigns.length && (
-                <div className="panel">
-                  <Empty
-                    icon={Send}
-                    title="O conversație bună începe cu o campanie bună"
-                    text="Alege audiența, ritmul de trimitere și mesajele. Tu decizi când pornește."
-                  >
-                    <Button
-                      disabled={!manager}
-                      onClick={() => open("campaign")}
-                    >
-                      <Plus size={16} />
-                      Creează prima campanie
-                    </Button>
-                  </Empty>
+                  ))}
                 </div>
-              )}
+                {data.campaigns
+                  .filter(
+                    (campaign) =>
+                      campaign.name ===
+                      "Evaluare controlată · revizuire ciorne",
+                  )
+                  .map((campaign) => (
+                    <Panel
+                      key={`${campaign.id}-review`}
+                      title="Revizuire mesaje · Varianta B"
+                      subtitle="Șablonul tău Voxa, cu 30 de zile de test gratuit. Toate mesajele rămân ciorne."
+                    >
+                      <Table>
+                        <thead>
+                          <tr>
+                            <th>Prospect</th>
+                            <th>Fapt folosit</th>
+                            <th>Scor</th>
+                            <th>Subiect</th>
+                            <th>Ciornă</th>
+                            <th>Cost estimat</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {reviewRows(campaign.id).map(
+                            ({ lead, draft, activity }) => {
+                              const metadata = jsonObject(
+                                draft?.metadata || null,
+                              );
+                              const details = jsonObject(
+                                activity?.details || null,
+                              );
+                              return (
+                                <tr key={lead?.id || draft?.lead_id}>
+                                  <td>
+                                    {lead ? (
+                                      <Link href={`/leads/${lead.id}`}>
+                                        {lead.company_name}
+                                      </Link>
+                                    ) : (
+                                      "Prospect indisponibil"
+                                    )}
+                                  </td>
+                                  <td
+                                    style={{
+                                      whiteSpace: "normal",
+                                      minWidth: 190,
+                                      maxWidth: 280,
+                                    }}
+                                  >
+                                    {String(
+                                      metadata.fact_used ||
+                                        "Niciun fapt specific folosit",
+                                    )}
+                                  </td>
+                                  <td>{lead?.lead_score ?? "—"}/100</td>
+                                  <td
+                                    style={{
+                                      whiteSpace: "normal",
+                                      minWidth: 210,
+                                    }}
+                                  >
+                                    {draft?.subject || "În așteptare"}
+                                  </td>
+                                  <td
+                                    style={{
+                                      whiteSpace: "pre-wrap",
+                                      minWidth: 360,
+                                      maxWidth: 520,
+                                      lineHeight: 1.55,
+                                    }}
+                                  >
+                                    {draft?.body ||
+                                      "Se va genera când Gemini permite reluarea."}
+                                  </td>
+                                  <td>
+                                    {activity
+                                      ? `$${Number(
+                                          details.estimated_cost_usd || 0,
+                                        ).toFixed(6)}`
+                                      : "—"}
+                                  </td>
+                                </tr>
+                              );
+                            },
+                          )}
+                        </tbody>
+                      </Table>
+                    </Panel>
+                  ))}
+                {!data.campaigns.length && (
+                  <div className="panel">
+                    <Empty
+                      icon={Send}
+                      title="O conversație bună începe cu o campanie bună"
+                      text="Alege audiența, ritmul de trimitere și mesajele. Tu decizi când pornește."
+                    >
+                      <Button
+                        disabled={!manager}
+                        onClick={() => open("campaign")}
+                      >
+                        <Plus size={16} />
+                        Creează prima campanie
+                      </Button>
+                    </Empty>
+                  </div>
+                )}
+              </details>
             </>
           )}
           {section === "campaigns" && campaignReviewId && (
@@ -2203,70 +2633,16 @@ export function Workspace({
               busy={busy}
               manager={manager}
               act={act}
+              requestInternalTest={requestInternalTest}
             />
           )}
           {section === "inbox" && (
-            <div className="panel inbox">
-              <div className="inbox-list">
-                {[...new Set(data.messages.map((m) => m.lead_id))].map((id) => (
-                  <button
-                    key={id}
-                    className={`inbox-item ${(inboxLead || data.messages[0]?.lead_id) === id ? "active" : ""}`}
-                    onClick={() => setInboxLead(id)}
-                  >
-                    <strong>{leadName(id)}</strong>
-                    <small>
-                      {data.messages
-                        .find((m) => m.lead_id === id)
-                        ?.body.slice(0, 90)}
-                    </small>
-                  </button>
-                ))}
-                {!data.messages.length && (
-                  <Empty
-                    icon={Inbox}
-                    title="Nicio conversație"
-                    text="Mesajele și ciornele vor apărea aici."
-                  />
-                )}
-              </div>
-              <div className="panel-body">
-                {data.messages
-                  .filter(
-                    (m) =>
-                      m.lead_id === (inboxLead || data.messages[0]?.lead_id),
-                  )
-                  .slice()
-                  .reverse()
-                  .map(messageCard)}
-                {data.messages.length > 0 && (
-                  <form
-                    onSubmit={async (e) => {
-                      e.preventDefault();
-                      const form = e.currentTarget;
-                      const f = new FormData(form);
-                      const r = await act("message_reply", {
-                        lead_id: inboxLead || data.messages[0].lead_id,
-                        body: String(f.get("body")),
-                      });
-                      if (r) form.reset();
-                    }}
-                  >
-                    <Area label="Răspuns manual" name="body" rows={4} />
-                    <Button className="section-gap" disabled={!canEdit || busy}>
-                      Salvează ciorna
-                    </Button>
-                  </form>
-                )}
-                {!data.messages.length && (
-                  <Empty
-                    icon={Mail}
-                    title="Locul conversațiilor care contează"
-                    text="Răspunsurile sunt asociate automat prospectelor. Mesajele sensibile sunt trimise către echipă."
-                  />
-                )}
-              </div>
-            </div>
+            <GmailInbox
+              data={data}
+              manager={manager}
+              refresh={refresh}
+              act={act}
+            />
           )}
           {section === "demos" && (
             <>
@@ -2279,7 +2655,7 @@ export function Workspace({
                       className="muted"
                       style={{ fontSize: 13, margin: "8px 0 14px" }}
                     >
-                      Simulare demonstrativă VoxaTech
+                      Simulare demonstrativă Voxa
                     </p>
                     <Badge value={d.status} />
                     <div className="campaign-stats">
@@ -2293,6 +2669,7 @@ export function Workspace({
                       </div>
                     </div>
                     <Link
+                      prefetch={false}
                       className="button secondary"
                       href={`/demo/${d.share_token}`}
                       target="_blank"
@@ -2307,7 +2684,7 @@ export function Workspace({
                 <div className="panel">
                   <Empty
                     icon={AudioLines}
-                    title="Fă experiența VoxaTech personală"
+                    title="Fă experiența Voxa personală"
                     text="Deschide un prospect și generează o conversație demonstrativă pe baza serviciilor sale verificate."
                   >
                     <Link className="button secondary" href="/leads">
@@ -2400,6 +2777,18 @@ export function Workspace({
           {section === "analytics" && (
             <>
               <div className="toolbar">
+                <label className="field">
+                  Date afișate
+                  <select
+                    value={analyticsMode}
+                    onChange={(e) => setAnalyticsMode(e.target.value)}
+                  >
+                    <option value="production">Producție</option>
+                    <option value="all">
+                      Toate datele, inclusiv demo / evaluări
+                    </option>
+                  </select>
+                </label>
                 <label className="field">
                   De la
                   <input
@@ -2688,8 +3077,50 @@ export function Workspace({
               </Panel>
             </>
           )}
+          {path === "settings/account" && (
+            <section className="surface account-page">
+              <h2>Contul tău</h2>
+              <p>
+                {data.user.email} · {roleNames[data.user.role]}
+              </p>
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  const form = e.currentTarget;
+                  const password = String(new FormData(form).get("password"));
+                  const r = await act("password", { password });
+                  if (r !== null) form.reset();
+                }}
+              >
+                <label className="field">
+                  Parolă nouă
+                  <input
+                    name="password"
+                    type="password"
+                    required
+                    minLength={12}
+                    autoComplete="new-password"
+                  />
+                </label>
+                <Button disabled={busy}>Schimbă parola</Button>
+              </form>
+              <p className="helper-text">Minimum 12 caractere.</p>
+              <Button
+                variant="secondary"
+                disabled={busy}
+                onClick={() => act("logout", {})}
+              >
+                Deconectare
+              </Button>
+            </section>
+          )}
           {path === "settings/integrations" && (
             <>
+              <GmailAccountsPanel
+                data={data}
+                manager={manager}
+                refresh={refresh}
+              />
               <div className="grid-equal">
                 {[
                   [
@@ -2706,21 +3137,6 @@ export function Workspace({
                     "resend",
                     "Resend",
                     "Emailuri, evenimente de livrare și răspunsuri.",
-                  ],
-                  [
-                    "elevenlabs",
-                    "ElevenLabs",
-                    "Două voci pentru conversațiile demonstrative.",
-                  ],
-                  [
-                    "stripe",
-                    "Stripe",
-                    "Plăți și pornirea configurării clientului.",
-                  ],
-                  [
-                    "whatsapp",
-                    "WhatsApp",
-                    "Adaptor pregătit. Necesită integrare și fluxuri aprobate.",
                   ],
                 ].map(([id, name, description]) => (
                   <div key={id} className="panel integration">
@@ -2748,9 +3164,9 @@ export function Workspace({
                                 ? `Domeniu verificat · ${String(resendConfig.sender_domain || "Resend")}`
                                 : id === "resend" && data.providers[id]
                                   ? "Configurație detectată · verifică domeniul"
-                              : data.providers[id]
-                                ? "Chei configurate · verifică înainte de utilizare"
-                                : "Neconfigurat"}
+                                  : data.providers[id]
+                                    ? "Chei configurate · verifică înainte de utilizare"
+                                    : "Neconfigurat"}
                       </span>
                     </div>
                   </div>
@@ -2765,68 +3181,13 @@ export function Workspace({
                   fiecare serviciu cu un test controlat.
                 </p>
                 <p className="copy section-gap">
+                  Răspunsurile Gmail revin în căsuța expeditorului și în Inbox.
                   Email:{" "}
                   {data.delivery === "live"
                     ? "mod live — necesită și o campanie activă"
                     : "mod local — trimiterile sunt simulate și marcate clar; nu se trimit emailuri"}
-                  . WhatsApp rămâne neconfigurat până la implementarea unui
-                  furnizor și verificarea permisiunilor de conversație.
+                  .
                 </p>
-              </div>
-              <div className="section-gap">
-                <Panel
-                  title="Șabloane WhatsApp"
-                  subtitle="Ciorne interne. Trimiterea necesită un furnizor conectat și aprobarea șablonului."
-                >
-                  <div className="panel-body">
-                    {data.settings
-                      .filter((s) => s.key.startsWith("whatsapp_template:"))
-                      .map((s) => (
-                        <div className="message" key={s.id}>
-                          <h3>
-                            {String(jsonObject(s.value).name || "Șablon")}
-                          </h3>
-                          <p className="copy">
-                            {String(jsonObject(s.value).body || "")}
-                          </p>
-                          <span className="badge section-gap">
-                            În așteptarea aprobării furnizorului
-                          </span>
-                        </div>
-                      ))}
-                    <form
-                      onSubmit={async (e) => {
-                        e.preventDefault();
-                        const form = e.currentTarget;
-                        const input = Object.fromEntries(new FormData(form));
-                        if (await act("whatsapp_template", input)) form.reset();
-                      }}
-                    >
-                      <div className="form-grid">
-                        <Field label="Nume șablon" name="name" required />
-                        <label className="field">
-                          Flux permis
-                          <select name="flow">
-                            <option value="user_initiated">
-                              Conversație inițiată de prospect
-                            </option>
-                            <option value="opt_in">
-                              Consimțământ explicit înregistrat
-                            </option>
-                          </select>
-                        </label>
-                        <Area label="Mesaj în română" name="body" rows={3} />
-                      </div>
-                      <Button
-                        className="section-gap"
-                        variant="secondary"
-                        disabled={!manager || busy}
-                      >
-                        Salvează ciorna șablonului
-                      </Button>
-                    </form>
-                  </div>
-                </Panel>
               </div>
             </>
           )}
@@ -2943,7 +3304,7 @@ export function Workspace({
                     </div>
                   </Panel>
                   <div className="section-gap">
-                    <Panel title="Echipa VoxaTech">
+                    <Panel title="Echipa Voxa">
                       <div>
                         {data.profiles.map((p) => (
                           <div className="list-row" key={p.id}>
@@ -3083,6 +3444,43 @@ export function Workspace({
         </div>
       </main>
       <Modal
+        open={!!messageEdit}
+        onOpenChange={() => setMessageEdit(null)}
+        title="Editează ciorna"
+      >
+        {messageEdit && (
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              const r = await act("message_save", messageEdit);
+              if (r !== null) setMessageEdit(null);
+            }}
+          >
+            <label className="field">
+              Mesaj
+              <textarea
+                rows={12}
+                value={messageEdit.body}
+                onChange={(e) =>
+                  setMessageEdit({ ...messageEdit, body: e.target.value })
+                }
+                required
+              />
+            </label>
+            <div className="form-actions">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => setMessageEdit(null)}
+              >
+                Anulează
+              </Button>
+              <Button disabled={busy}>Salvează ciorna</Button>
+            </div>
+          </form>
+        )}
+      </Modal>
+      <Modal
         open={modal === "lead"}
         onOpenChange={() => setModal(null)}
         title={editLead ? "Editează prospectul" : "Prospect nou"}
@@ -3173,162 +3571,48 @@ export function Workspace({
           </div>
         </form>
       </Modal>
+      {modal === "campaign" && (
+        <CampaignWizard
+          key={edit || "new"}
+          open
+          onClose={() => setModal(null)}
+          data={data}
+          campaign={editCampaign}
+          busy={busy}
+          act={act}
+          initialStep={campaignStep}
+        />
+      )}
       <Modal
-        open={modal === "campaign"}
+        open={modal === "trash"}
         onOpenChange={() => setModal(null)}
-        title={editCampaign ? "Editează campania" : "Campanie nouă"}
+        title="Coș — leaduri șterse"
       >
-        <form
-          onSubmit={async (e) => {
-            e.preventDefault();
-            const f = new FormData(e.currentTarget);
-            const v = Object.fromEntries(f);
-            const r = await act("campaign_save", {
-              id: edit || undefined,
-              campaign: {
-                ...v,
-                cities: String(v.cities)
-                  .split(",")
-                  .map((s) => s.trim())
-                  .filter(Boolean),
-                daily_cap: Number(v.daily_cap),
-                target_filters: {
-                  min_score: String(v.min_score || "0"),
-                  source: String(v.target_source || ""),
-                },
-              },
-            });
-            if (r) setModal(null);
-          }}
-        >
-          <div className="form-grid">
-            <Field
-              label="Numele campaniei *"
-              name="name"
-              defaultValue={editCampaign?.name}
-              required
-            />
-            <Field
-              label="Specialitate"
-              name="niche"
-              defaultValue={editCampaign?.niche || ""}
-            />
-            <Field
-              label="Orașe · separate prin virgulă"
-              name="cities"
-              defaultValue={editCampaign?.cities.join(", ") || ""}
-            />
-            <Field
-              label="Email expeditor verificat *"
-              name="sender_identity"
-              type="email"
-              defaultValue={editCampaign?.sender_identity || ""}
-              required
-            />
-            <Field
-              label="Scor AI minim"
-              name="min_score"
-              type="number"
-              defaultValue={String(
-                jsonObject(editCampaign?.target_filters || {}).min_score || "0",
-              )}
-            />
-            <Field
-              label="Sursă prospecte · opțional"
-              name="target_source"
-              defaultValue={String(
-                jsonObject(editCampaign?.target_filters || {}).source || "",
-              )}
-            />
-            <Field
-              label="Tonul mesajelor"
-              name="tone"
-              defaultValue={editCampaign?.tone || "profesional, natural"}
-            />
-            <Field
-              label="Limită zilnică"
-              name="daily_cap"
-              type="number"
-              defaultValue={editCampaign?.daily_cap || 25}
-            />
-            <Field
-              label="Început · București"
-              name="window_start"
-              type="time"
-              defaultValue={editCampaign?.window_start.slice(0, 5) || "09:30"}
-            />
-            <Field
-              label="Sfârșit · București"
-              name="window_end"
-              type="time"
-              defaultValue={editCampaign?.window_end.slice(0, 5) || "16:30"}
-            />
-            <label className="field full">
-              Mod de trimitere
-              <select
-                name="mode"
-                defaultValue={editCampaign?.mode || "approval_required"}
-              >
-                <option value="approval_required">
-                  Aprobare înainte de trimitere
-                </option>
-                <option value="automatic">
-                  Automat · numai după activarea campaniei
-                </option>
-              </select>
-            </label>
-            <Area
-              label="Oferta"
-              name="offer"
-              value={
-                editCampaign?.offer ||
-                "Recepționer AI VoxaTech pentru preluarea apelurilor și programări."
-              }
-              rows={3}
-            />
-            <Area
-              label="Direcție pentru primul mesaj"
-              name="first_message"
-              value={
-                editCampaign?.first_message ||
-                "O observație verificată despre clinică. O întrebare despre apelurile din afara programului."
-              }
-              rows={3}
-            />
-            <Area
-              label="Revenire 1"
-              name="follow_up_1"
-              value={
-                editCampaign?.follow_up_1 ||
-                "O revenire scurtă, utilă, fără presiune."
-              }
-              rows={2}
-            />
-            <Area
-              label="Revenire 2"
-              name="follow_up_2"
-              value={
-                editCampaign?.follow_up_2 ||
-                "Ultima revenire. Oferă opțiunea clară de a opri conversația."
-              }
-              rows={2}
-            />
-          </div>
-          <p className="muted section-gap" style={{ fontSize: 13 }}>
-            Doar în zilele lucrătoare. Maximum două reveniri. O pauză aleatorie
-            de 1–3 minute între mesaje.
-          </p>
-          <div className="form-actions">
+        <p className="helper-text">
+          Restaurarea readuce leadul în CRM. Mesajele și campaniile oprite nu se
+          reactivează automat.
+        </p>
+        {(data.archived_leads || []).map((l) => (
+          <div className="list-row" key={l.id}>
+            <div>
+              <strong>{l.company_name}</strong>
+              <small>
+                {l.email || "Email necunoscut"} · {dateTime(l.deleted_at)}
+              </small>
+            </div>
             <Button
-              type="button"
+              size="sm"
               variant="secondary"
-              onClick={() => setModal(null)}
+              disabled={!manager || busy}
+              onClick={() => act("lead_restore", { ids: [l.id] })}
             >
-              Anulează
+              Restaurează
             </Button>
-            <Button disabled={busy}>Salvează campania</Button>
           </div>
-        </form>
+        ))}
+        {!data.archived_leads?.length && (
+          <p className="quiet-empty">Coșul este gol.</p>
+        )}
       </Modal>
       <Modal
         open={modal === "knowledge"}
@@ -3411,11 +3695,30 @@ export function Workspace({
           </>
         )}
       </Modal>
-      <ImportDialog
-        open={modal === "import"}
-        close={() => setModal(null)}
-        onImport={(rows) => act("import", rows)}
-      />
+      {modal === "import" && (
+        <ImportDialog
+          open={modal === "import"}
+          close={() => setModal(null)}
+          onImport={async (rows) => {
+            const response = await fetch("/api/actions", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "import", data: rows }),
+            });
+            const result = await response.json();
+            if (!response.ok)
+              throw new Error(result.error || "Import nereușit.");
+            return result;
+          }}
+          onComplete={refresh}
+          leadLists={data.lead_lists}
+          initialListId={
+            filters.lead_list_id === "unassigned"
+              ? ""
+              : filters.lead_list_id || ""
+          }
+        />
+      )}
       <Modal
         open={!!confirm}
         onOpenChange={() => setConfirm(null)}

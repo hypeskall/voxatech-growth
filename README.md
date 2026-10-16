@@ -2,7 +2,9 @@
 
 Sistem intern de achiziție și vânzări VoxaTech. Next.js 16, TypeScript strict, App Router, Tailwind CSS, componente shadcn/ui bazate pe Radix și Supabase. Interfața și textele generate sunt în română.
 
-**Aplicația rulează local. Nu a fost publicată și nu a trimis mesaje către prospecte.** Supabase este conectat, migrările sunt aplicate tranzacțional, autentificarea este configurată și izolarea organizațiilor a fost verificată pe proiectul real.
+Fluxul Gmail nou include conectarea mai multor căsuțe, Autopilot cu pornire/pauză, limite comune de 1–10 trimiteri pe zi per căsuță și Inbox pentru răspunsuri. Începe cu [ghidul de activare pas cu pas](ACTIVARE_PAS_CU_PAS.md); detalii în [configurarea Gmail](GMAIL_SETUP.md). Migrarea și programarea sunt aplicate; conectarea Google și publicarea versiunii actualizate necesită acces valid la conturile furnizorilor.
+
+**Versiunea actualizată cu Gmail este publicată pe https://voxa-growth.vercel.app din 14 octombrie 2026, în modul de test. Clientul Google a fost configurat pe 15 octombrie; mai sunt necesare conectarea căsuțelor și testele interne. În această implementare nu au fost trimise mesaje reale către prospecte.** Supabase este conectat, migrările sunt aplicate tranzacțional, autentificarea este configurată și izolarea organizațiilor a fost verificată pe proiectul real.
 
 ## Pornire și cont
 
@@ -22,7 +24,7 @@ Evaluările cu liste reale folosesc `scripts/evaluation-leads.local.json`, exclu
 ## Funcționalități
 
 - Dashboard, prospecte, detalii, campanii, conversații, demo-uri, cunoștințe, analize, setări și integrări, cu date Supabase reale, stări goale și erori explicite.
-- Autentificare verificată pe server, roluri owner/admin/operator/viewer, RLS pe 21 de tabele, organizații, audit și fișiere private.
+- Autentificare verificată pe server, roluri owner/admin/operator/viewer, RLS pe 29 de tabele, organizații, audit și fișiere private.
 - Creare/editare, filtre, selecție multiplă, export CSV protejat împotriva formulelor, import cu mapare/previzualizare, rezultate pe rând și deduplicare.
 - Campanii cu audiență, scor minim/sursă, expeditor, ton, ofertă, limită zilnică, interval București, maximum două reveniri, aprobare/mod automat și activare/pauză/arhivare.
 - Ciorne editabile, aprobare explicită, răspuns manual, suprimare, oprirea revenirilor la răspuns și sarcini pentru intervenție umană.

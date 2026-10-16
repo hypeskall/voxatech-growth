@@ -15,11 +15,18 @@ import {
   runAiEvaluationBatch,
   runControlledAiTest,
 } from "@/lib/automation";
-import { email, verifyResendSenderDomain } from "@/lib/providers/email";
 import {
-  evaluateLaunchReadiness,
-  validProspectEmail,
-} from "@/lib/launch";
+  email,
+  sendOrganizationInternalTest,
+  verifyResendSenderDomain,
+} from "@/lib/providers/email";
+import { gmailAccount } from "@/lib/providers/gmail";
+import { gmailConfigurationReady } from "@/lib/gmail-security";
+import {
+  internalTestRecipient,
+  internalTestRequest,
+} from "@/lib/internal-test-email";
+import { evaluateLaunchReadiness, validProspectEmail } from "@/lib/launch";
 export const maxDuration = 300;
 const envelope = z.object({ action: z.string(), data: z.unknown() });
 const idsSchema = z.object({
@@ -91,20 +98,24 @@ async function campaignLaunchReadiness(
   );
   const publicConfig = metadataObject(integration?.public_config);
   const configuredFrom = process.env.RESEND_FROM_EMAIL || "";
-  const fromAddress =
-    configuredFrom.match(/<([^>]+)>/)?.[1] || configuredFrom;
+  const fromAddress = configuredFrom.match(/<([^>]+)>/)?.[1] || configuredFrom;
   const fromDomain = fromAddress.toLowerCase().split("@")[1] || "";
   const campaignSenderDomain = (campaign.sender_identity || "")
     .toLowerCase()
     .split("@")[1];
-  const senderVerified =
-    !!process.env.RESEND_API_KEY &&
-    !!process.env.RESEND_FROM_EMAIL &&
-    !!integration?.last_verified_at &&
-    publicConfig.sender_domain_verified === true &&
-    publicConfig.sender_domain === fromDomain &&
-    validProspectEmail(campaign.sender_identity || "") &&
-    campaignSenderDomain === fromDomain;
+  const connectedGmail = await gmailAccount(
+    organizationId,
+    campaign.sender_identity || "",
+  );
+  const senderVerified = connectedGmail
+    ? gmailConfigurationReady() && connectedGmail.status === "connected"
+    : !!process.env.RESEND_API_KEY &&
+      !!process.env.RESEND_FROM_EMAIL &&
+      !!integration?.last_verified_at &&
+      publicConfig.sender_domain_verified === true &&
+      publicConfig.sender_domain === fromDomain &&
+      validProspectEmail(campaign.sender_identity || "") &&
+      campaignSenderDomain === fromDomain;
   const readiness = evaluateLaunchReadiness({
     senderVerified,
     recipients: leads,
@@ -132,6 +143,11 @@ export async function POST(req: NextRequest) {
     if (raw.length > 1500000)
       return NextResponse.json({ error: "Date prea mari." }, { status: 413 });
     const { action, data } = envelope.parse(JSON.parse(raw));
+    if (["checkout", "demo", "send_demo", "whatsapp_template"].includes(action))
+      return NextResponse.json(
+        { error: "Această integrare a fost retrasă din Voxa." },
+        { status: 410 },
+      );
     const db = s.db;
     const root = admin();
     const manager = ["owner", "admin"].includes(s.role);
@@ -140,6 +156,8 @@ export async function POST(req: NextRequest) {
     if (
       [
         "campaign_save",
+        "lead_delete",
+        "lead_restore",
         "campaign_status",
         "knowledge_save",
         "knowledge_delete",
@@ -159,13 +177,28 @@ export async function POST(req: NextRequest) {
       throw new Error("Este necesar rolul de administrator.");
     let result: unknown = { ok: true };
     switch (action) {
+      case "lead_delete":
+      case "lead_restore": {
+        const input = idsSchema.parse(data);
+        result = {
+          affected: check(
+            await root.rpc(
+              action === "lead_delete" ? "trash_leads" : "restore_leads",
+              { org: s.org, targets: input.ids, actor: s.user.id },
+            ),
+          ),
+        };
+        break;
+      }
       case "ai_controlled_test": {
         z.object({}).parse(data);
         result = await runControlledAiTest(s.org, s.user.id);
         break;
       }
       case "ai_evaluation_batch": {
-        const input = z.object({ ids: z.array(z.uuid()).min(1).max(10) }).parse(data);
+        const input = z
+          .object({ ids: z.array(z.uuid()).min(1).max(10) })
+          .parse(data);
         result = await runAiEvaluationBatch(s.org, s.user.id, input.ids);
         break;
       }
@@ -192,6 +225,7 @@ export async function POST(req: NextRequest) {
               .update(cleaned)
               .eq("id", input.id)
               .eq("organization_id", s.org)
+              .is("deleted_at", null)
               .select()
               .single(),
           );
@@ -214,7 +248,26 @@ export async function POST(req: NextRequest) {
         break;
       }
       case "import": {
-        const input = z.array(leadInput).max(500).parse(data);
+        const envelope = z
+          .union([
+            z.array(leadInput).max(500),
+            z.object({
+              rows: z.array(leadInput).max(500),
+              lead_list_id: z.uuid(),
+            }),
+          ])
+          .parse(data);
+        const input = Array.isArray(envelope) ? envelope : envelope.rows;
+        const listId = Array.isArray(envelope) ? null : envelope.lead_list_id;
+        if (listId)
+          check(
+            await db
+              .from("lead_lists")
+              .select("id")
+              .eq("organization_id", s.org)
+              .eq("id", listId)
+              .single(),
+          );
         const errors: { row: number; error: string }[] = [];
         const inserted_ids: string[] = [];
         let inserted = 0;
@@ -225,6 +278,7 @@ export async function POST(req: NextRequest) {
             .insert({
               ...item,
               organization_id: s.org,
+              lead_list_id: listId,
               email: item.email?.toLowerCase() || null,
               website: item.website || null,
               phone: normalizePhone(item.phone),
@@ -243,14 +297,58 @@ export async function POST(req: NextRequest) {
           }
           inserted++;
           inserted_ids.push(r.data.id);
-          await enqueue(
-            s.org,
-            "enrich_new_leads",
-            `enrich:${r.data.id}:initial`,
-            r.data.id,
-          );
+          if (!listId)
+            await enqueue(
+              s.org,
+              "enrich_new_leads",
+              `enrich:${r.data.id}:initial`,
+              r.data.id,
+            );
         }
         result = { inserted, inserted_ids, errors };
+        break;
+      }
+      case "lead_list_create": {
+        const input = z
+          .object({
+            name: z.string().trim().min(2).max(160),
+            niche: z.string().trim().max(100).default(""),
+          })
+          .parse(data);
+        result = check(
+          await db
+            .from("lead_lists")
+            .insert({ ...input, organization_id: s.org })
+            .select()
+            .single(),
+        );
+        break;
+      }
+      case "lead_list_assign": {
+        const input = z
+          .object({
+            ids: z.array(z.uuid()).min(1).max(5000),
+            lead_list_id: z.uuid().nullable(),
+          })
+          .parse(data);
+        if (input.lead_list_id)
+          check(
+            await db
+              .from("lead_lists")
+              .select("id")
+              .eq("organization_id", s.org)
+              .eq("id", input.lead_list_id)
+              .single(),
+          );
+        result = check(
+          await db
+            .from("leads")
+            .update({ lead_list_id: input.lead_list_id })
+            .eq("organization_id", s.org)
+            .in("id", input.ids)
+            .is("deleted_at", null)
+            .select("id"),
+        );
         break;
       }
       case "bulk_status":
@@ -268,7 +366,8 @@ export async function POST(req: NextRequest) {
             .from("leads")
             .select("*")
             .eq("organization_id", s.org)
-            .in("id", input.ids),
+            .in("id", input.ids)
+            .is("deleted_at", null),
         );
         if (leads.length !== input.ids.length)
           throw new Error("Prospect inaccesibil.");
@@ -407,6 +506,32 @@ export async function POST(req: NextRequest) {
         const input = z
           .object({ id: z.uuid().optional(), campaign: campaignInput })
           .parse(data);
+        if (input.id) {
+          const previous = check(
+            await db
+              .from("campaigns")
+              .select("sender_identity,status")
+              .eq("organization_id", s.org)
+              .eq("id", input.id)
+              .single(),
+          );
+          if (
+            previous.sender_identity !== input.campaign.sender_identity &&
+            (previous.status === "active" ||
+              check(
+                await db
+                  .from("messages")
+                  .select("id")
+                  .eq("organization_id", s.org)
+                  .eq("campaign_id", input.id)
+                  .eq("status", "sending")
+                  .limit(1),
+              ).length)
+          )
+            throw new Error(
+              "Pune campania în pauză și verifică trimiterile în curs înainte de schimbarea expeditorului.",
+            );
+        }
         result = input.id
           ? check(
               await db
@@ -478,7 +603,14 @@ export async function POST(req: NextRequest) {
           .object({
             id: z.uuid(),
             body: z.string().min(1).max(20000).optional(),
-            subject: z.string().max(300).optional(),
+            subject: z
+              .string()
+              .max(300)
+              .refine(
+                (value) => !/[\r\n]/.test(value),
+                "Subiectul trebuie să fie pe un singur rând.",
+              )
+              .optional(),
           })
           .parse(data);
         const m = check(
@@ -503,6 +635,45 @@ export async function POST(req: NextRequest) {
         const isReviewVariant =
           action === "message_approve" &&
           ["A", "B"].includes(String(messageMetadata.outreach_variant || ""));
+        const updatedMessage = await root
+          .from("messages")
+          .update(
+            action === "message_approve"
+              ? {
+                  status: "approved",
+                  approved_by: s.user.id,
+                  approved_at: new Date().toISOString(),
+                  follow_up_number: isReviewVariant ? 0 : m.follow_up_number,
+                  metadata: {
+                    ...messageMetadata,
+                    human_approved: true,
+                    review_state: "approved",
+                  },
+                }
+              : {
+                  body: input.body || m.body,
+                  subject: input.subject ?? m.subject,
+                  status: "draft",
+                  approved_by: null,
+                  approved_at: null,
+                  metadata: {
+                    ...messageMetadata,
+                    review_state: "draft",
+                    human_approved: false,
+                  },
+                },
+          )
+          .eq("id", m.id)
+          .eq("organization_id", s.org)
+          .eq("status", m.status)
+          .eq("updated_at", m.updated_at)
+          .select("id")
+          .single();
+        if (updatedMessage.error)
+          throw new Error(
+            "Mesajul s-a schimbat sau a început să fie trimis. Actualizează istoricul înainte de modificare.",
+          );
+        check(updatedMessage);
         if (isReviewVariant && m.campaign_id) {
           check(
             await root
@@ -516,37 +687,6 @@ export async function POST(req: NextRequest) {
               .in("status", ["draft", "approved", "queued"]),
           );
         }
-        check(
-          await root
-            .from("messages")
-            .update(
-              action === "message_approve"
-                ? {
-                    status: "approved",
-                    approved_by: s.user.id,
-                    approved_at: new Date().toISOString(),
-                    follow_up_number: isReviewVariant ? 0 : m.follow_up_number,
-                    metadata: {
-                      ...messageMetadata,
-                      human_approved: true,
-                      review_state: "approved",
-                    },
-                  }
-                : {
-                    body: input.body || m.body,
-                    subject: input.subject ?? m.subject,
-                    status: "draft",
-                    approved_by: null,
-                    approved_at: null,
-                    metadata: {
-                      ...messageMetadata,
-                      review_state: "draft",
-                    },
-                  },
-            )
-            .eq("id", m.id)
-            .eq("organization_id", s.org),
-        );
         if (action === "message_approve") {
           const campaign = m.campaign_id
             ? check(
@@ -589,26 +729,37 @@ export async function POST(req: NextRequest) {
             .eq("id", input.id)
             .single(),
         );
-        if (message.direction !== "outbound" || message.sent_at)
+        if (
+          message.direction !== "outbound" ||
+          message.sent_at ||
+          !["draft", "approved", "queued"].includes(message.status)
+        )
           throw new Error("Mesajul nu mai poate fi respins.");
         const metadata = metadataObject(message.metadata);
-        check(
-          await root
-            .from("messages")
-            .update({
-              status: "draft",
-              approved_by: null,
-              approved_at: null,
-              metadata: {
-                ...metadata,
-                review_state: "rejected",
-                internal_note:
-                  input.note ?? String(metadata.internal_note || ""),
-              },
-            })
-            .eq("organization_id", s.org)
-            .eq("id", message.id),
-        );
+        const rejectedMessage = await root
+          .from("messages")
+          .update({
+            status: "draft",
+            approved_by: null,
+            approved_at: null,
+            metadata: {
+              ...metadata,
+              review_state: "rejected",
+              human_approved: false,
+              internal_note: input.note ?? String(metadata.internal_note || ""),
+            },
+          })
+          .eq("organization_id", s.org)
+          .eq("id", message.id)
+          .eq("status", message.status)
+          .eq("updated_at", message.updated_at)
+          .select("id")
+          .single();
+        if (rejectedMessage.error)
+          throw new Error(
+            "Mesajul s-a schimbat sau a început să fie trimis. Actualizează istoricul înainte de respingere.",
+          );
+        check(rejectedMessage);
         await log(
           s.org,
           "message_reject",
@@ -659,7 +810,7 @@ export async function POST(req: NextRequest) {
         break;
       }
       case "message_test": {
-        const input = z.object({ id: z.uuid() }).parse(data);
+        const input = internalTestRequest.parse(data);
         const message = check(
           await root
             .from("messages")
@@ -671,17 +822,14 @@ export async function POST(req: NextRequest) {
         const metadata = metadataObject(message.metadata);
         if (
           message.direction !== "outbound" ||
-          metadata.outreach_variant !== "B"
+          !["draft", "approved", "queued"].includes(message.status)
         )
-          throw new Error("Testul este disponibil numai pentru Varianta B.");
-        const internalRecipient = z
-          .email()
-          .parse(process.env.INTERNAL_TEST_EMAIL)
-          .toLowerCase();
-        if (internalRecipient !== s.user.email?.toLowerCase())
           throw new Error(
-            "INTERNAL_TEST_EMAIL trebuie să fie emailul utilizatorului autentificat.",
+            "Testul este disponibil numai pentru o ciornă activă.",
           );
+        const internalRecipient = internalTestRecipient(
+          process.env.INTERNAL_TEST_EMAIL,
+        );
         const matchingProspects = check(
           await root
             .from("leads")
@@ -694,11 +842,40 @@ export async function POST(req: NextRequest) {
           throw new Error(
             "Adresa internă de test apare la un prospect și nu poate fi folosită.",
           );
-        const sent = await email.sendInternalTest({
-          subject: message.subject || "Ciornă Voxa Growth",
-          text: message.body,
-          key: `review-test:${message.id}:${message.updated_at}`,
-        });
+        let sent: Awaited<ReturnType<typeof email.sendInternalTest>>;
+        const campaignFrom = message.campaign_id
+          ? check(
+              await root
+                .from("campaigns")
+                .select("sender_identity")
+                .eq("organization_id", s.org)
+                .eq("id", message.campaign_id)
+                .single(),
+            ).sender_identity
+          : null;
+        try {
+          sent = await sendOrganizationInternalTest(s.org, campaignFrom, {
+            subject: message.subject || "Ciornă Voxa",
+            text: message.body,
+            key: `review-test:${message.id}:${message.updated_at}`,
+          });
+        } catch (error) {
+          await log(
+            s.org,
+            "message_test_failed",
+            message.lead_id,
+            {
+              message_id: message.id,
+              campaign_id: message.campaign_id,
+              recipient: "internal_test_email",
+              result: "failed",
+              error: safeError(error),
+            },
+            null,
+            s.user.id,
+          );
+          throw error;
+        }
         const sentAt = new Date().toISOString();
         check(
           await root
@@ -722,6 +899,9 @@ export async function POST(req: NextRequest) {
             message_id: message.id,
             campaign_id: message.campaign_id,
             recipient: "internal_test_email",
+            result: "sent",
+            provider_mode: sent.mode,
+            provider_id: sent.id,
           },
           null,
           s.user.id,
@@ -765,7 +945,11 @@ export async function POST(req: NextRequest) {
       }
       case "message_reply": {
         const input = z
-          .object({ lead_id: z.uuid(), body: z.string().min(1).max(20000) })
+          .object({
+            lead_id: z.uuid(),
+            body: z.string().min(1).max(20000),
+            inbound_id: z.uuid().optional(),
+          })
           .parse(data);
         const lead = check(
           await db
@@ -795,30 +979,78 @@ export async function POST(req: NextRequest) {
             .order("created_at", { ascending: false })
             .limit(1),
         )[0];
+        let inboundQuery = db
+          .from("messages")
+          .select("id,subject,campaign_id,metadata")
+          .eq("organization_id", s.org)
+          .eq("lead_id", lead.id)
+          .eq("direction", "inbound");
+        if (input.inbound_id)
+          inboundQuery = inboundQuery.eq("id", input.inbound_id);
         const inbound = check(
-          await db
-            .from("messages")
-            .select("id")
-            .eq("organization_id", s.org)
-            .eq("lead_id", lead.id)
-            .eq("direction", "inbound")
+          await inboundQuery
             .order("received_at", { ascending: false })
             .limit(1),
         )[0];
-        check(
-          await root.from("messages").insert({
-            organization_id: s.org,
-            lead_id: lead.id,
-            conversation_id: conv.id,
-            campaign_id: assignment?.campaign_id,
-            in_reply_to: inbound?.id,
-            direction: "outbound",
-            body: input.body,
-            subject: `Re: ${lead.company_name}`,
-            status: "draft",
-            idempotency_key: crypto.randomUUID(),
-          }),
-        );
+        if (input.inbound_id && !inbound)
+          throw new Error("Răspunsul ales nu aparține acestei conversații.");
+        const previousReply = inbound
+          ? check(
+              await db
+                .from("messages")
+                .select("id,status,idempotency_key,metadata,updated_at")
+                .eq("organization_id", s.org)
+                .eq("in_reply_to", inbound.id)
+                .maybeSingle(),
+            )
+          : null;
+        if (
+          previousReply &&
+          !["draft", "approved", "queued"].includes(previousReply.status)
+        )
+          throw new Error(
+            "Răspunsul a fost deja trimis sau este în curs. Verifică istoricul înainte de o nouă trimitere.",
+          );
+        const replyValues = {
+          organization_id: s.org,
+          lead_id: lead.id,
+          conversation_id: conv.id,
+          campaign_id: inbound?.campaign_id || assignment?.campaign_id,
+          in_reply_to: inbound?.id,
+          direction: "outbound",
+          body: input.body,
+          subject: inbound?.subject
+            ? /^re:/i.test(inbound.subject)
+              ? inbound.subject
+              : `Re: ${inbound.subject}`
+            : `Re: ${lead.company_name}`,
+          status: "draft",
+          idempotency_key:
+            previousReply?.idempotency_key || crypto.randomUUID(),
+          approved_by: null,
+          approved_at: null,
+          metadata: {
+            ...metadataObject(previousReply?.metadata),
+            review_state: "draft",
+            human_approved: false,
+          },
+        };
+        if (previousReply) {
+          const updated = await root
+            .from("messages")
+            .update(replyValues)
+            .eq("organization_id", s.org)
+            .eq("id", previousReply.id)
+            .eq("status", previousReply.status)
+            .eq("updated_at", previousReply.updated_at)
+            .select("id")
+            .single();
+          if (updated.error)
+            throw new Error(
+              "Răspunsul a început să fie trimis. Actualizează istoricul înainte de modificare.",
+            );
+          check(updated);
+        } else check(await root.from("messages").insert(replyValues));
         break;
       }
       case "knowledge_save": {

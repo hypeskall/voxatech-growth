@@ -40,6 +40,7 @@
     "stripe": "^22.6.2",
     "tailwind-merge": "^3.7.0",
     "tailwindcss": "^4.3.3",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "zod": "latest"
   },
   "devDependencies": {

@@ -67,7 +67,10 @@ export function safeError(error: unknown) {
     "SUPABASE_ACCESS_TOKEN",
     "OPENAI_API_KEY",
     "GEMINI_API_KEY",
+    "BRAVE_SEARCH_API_KEY",
     "RESEND_API_KEY",
+    "GOOGLE_GMAIL_CLIENT_SECRET",
+    "GMAIL_TOKEN_ENCRYPTION_KEY",
     "RESEND_FROM_EMAIL",
     "INTERNAL_TEST_EMAIL",
     "RESEND_WEBHOOK_SECRET",
@@ -75,11 +78,13 @@ export function safeError(error: unknown) {
     "STRIPE_SECRET_KEY",
     "STRIPE_WEBHOOK_SECRET",
     "CRON_SECRET",
+    "AUTOPILOT_CRON_SECRET",
   ]) {
     const value = process.env[name];
     if (value) text = text.split(value).join("[redactat]");
   }
   return text
+    .replace(/\b(?:ya29\.|1\/\/)[a-zA-Z0-9._-]+/g, "[redactat]")
     .replace(/\b(?:sk-|re_|sb_secret_)[a-zA-Z0-9_-]+/g, "[redactat]")
     .slice(0, 500);
 }

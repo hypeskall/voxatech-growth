@@ -47,6 +47,32 @@ export async function generateTypes(db) {
     )
     .join("\n");
   output += "\n}; CompositeTypes: Record<string, never> } };\n";
+  output = output.replace(
+    "Functions: {",
+    `Functions: {
+    select_gmail_lead_list: {Args:{org:string;target:string};Returns:undefined};
+    start_gmail_lead_list: {Args:{org:string;target:string;initial_template:string};Returns:number};
+    claim_gmail_delivery: {Args:{org:string;mailbox:string;request_key:string};Returns:boolean};
+    set_gmail_autopilot: {Args:{org:string;should_run:boolean;initial_template:string};Returns:number};
+    schedule_gmail_autopilot: {Args:{org:string};Returns:number};
+    trash_leads: {Args:{org:string;targets:string[];actor:string};Returns:number};
+    restore_leads: {Args:{org:string;targets:string[];actor:string};Returns:number};
+    autopilot_supplied_duplicate: {Args:{org:string;website:string;email:string;phone:string;exclude_lead:string};Returns:boolean};
+    schedule_autopilot: {Args:{target_org?:string};Returns:undefined};
+    autopilot_scheduler_status: {Args:Record<string,never>;Returns:Json};
+    autopilot_run_metrics: {Args:{org:string};Returns:Json};
+    refresh_autopilot_runs: {Args:{target_org?:string};Returns:undefined};
+    claim_autopilot_job: {Args:{target_org?:string};Returns:Database['public']['Tables']['automation_jobs']['Row'][]};
+    reserve_autopilot_request: {Args:{job_id:string;token:string;request_kind:string;amount:number};Returns:string|null};
+    settle_autopilot_request: {Args:{job_id:string;token:string;day_used:string;reserved:number;actual:number};Returns:boolean};
+    autopilot_duplicate: {Args:{org:string;website:string;email:string;phone:string};Returns:boolean};
+    checkpoint_autopilot: {Args:{job_id:string;token:string;candidate_id:string;changes:Json};Returns:boolean};
+    save_autopilot_discovery: {Args:{job_id:string;token:string;run_id:string;results:Json};Returns:number};
+    defer_autopilot_budget: {Args:{job_id:string;token:string};Returns:boolean};
+    commit_autopilot_lead: {Args:{job_id:string;token:string;candidate_id:string;prospect:Json};Returns:string|null};
+    commit_autopilot_draft: {Args:{job_id:string;token:string;candidate_id:string;draft:Json};Returns:string|null};
+  `,
+  );
   await writeFile(
     new URL("../src/lib/supabase/database.types.ts", import.meta.url),
     output,
