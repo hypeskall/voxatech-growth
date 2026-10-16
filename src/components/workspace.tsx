@@ -3,6 +3,7 @@ import { outreachCopyVersion } from "@/lib/outreach-template";
 import { useEffect, useState } from "react";
 import { AnimatedValue } from "./ambient";
 import { BrandMark } from "./brand-mark";
+import { MobileViewport } from "./mobile-viewport";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import Papa from "papaparse";
@@ -871,8 +872,9 @@ export function Workspace({
     jsonObject(geminiIntegration.public_config).health === "healthy";
   return (
     <div className="shell">
+      <MobileViewport />
       {busy && <div className="loading-bar" />}
-      <aside className={`sidebar ${mobile ? "open" : ""}`}>
+      <aside className="sidebar">
         <Link className="brand" href="/dashboard">
           <BrandMark />
           <div>Voxa</div>
@@ -956,13 +958,79 @@ export function Workspace({
           </button>
         </div>
       </aside>
+      <nav className="mobile-tabs" aria-label="Navigare principală pe telefon">
+        {nav
+          .filter(([url]) =>
+            ["dashboard", "leads", "autopilot", "inbox"].includes(url),
+          )
+          .map(([url, label, Icon]) => (
+            <Link
+              key={url}
+              prefetch={false}
+              href={`/${url}`}
+              aria-current={section === url ? "page" : undefined}
+            >
+              <Icon size={21} aria-hidden="true" />
+              <span>{label === "Dashboard" ? "Acasă" : label}</span>
+            </Link>
+          ))}
+        <button
+          type="button"
+          onClick={() => setMobile(true)}
+          aria-haspopup="dialog"
+          aria-expanded={mobile}
+          className={
+            !["dashboard", "leads", "autopilot", "inbox"].includes(section)
+              ? "active"
+              : ""
+          }
+        >
+          <Menu size={21} aria-hidden="true" />
+          <span>Mai mult</span>
+        </button>
+      </nav>
+      <Modal
+        open={mobile}
+        onOpenChange={setMobile}
+        title="Spațiul tău Voxa"
+        description="Alege o pagină din spațiul de lucru."
+      >
+        <nav className="mobile-navigation" aria-label="Toate paginile">
+          {[
+            ...nav,
+            ["settings", "Setări", Settings],
+            ["settings/account", "Contul meu", Users],
+          ].map(([url, label, Icon]) => (
+            <Link
+              key={String(url)}
+              href={`/${url}`}
+              prefetch={false}
+              onClick={() => setMobile(false)}
+              aria-current={path === url ? "page" : undefined}
+            >
+              <Icon size={21} aria-hidden="true" />
+              <span>{String(label)}</span>
+              <ChevronRight size={18} aria-hidden="true" />
+            </Link>
+          ))}
+        </nav>
+        <p className="mobile-account-email">{data.user.email}</p>
+        <Button
+          variant="secondary"
+          disabled={busy}
+          onClick={() => act("logout", {})}
+        >
+          <LogOut size={17} aria-hidden="true" />
+          Deconectare
+        </Button>
+      </Modal>
       <main className="main">
         <header className="topbar">
           <div className="actions">
             <button
               className="icon-button mobile-menu"
-              aria-label="Deschide meniul"
-              aria-expanded={mobile}
+              aria-label="Deschide navigarea"
+              aria-haspopup="dialog"
               onClick={() => setMobile(!mobile)}
             >
               <Menu size={20} />
@@ -1028,13 +1096,6 @@ export function Workspace({
               Reîncearcă
             </button>
           </div>
-        )}
-        {mobile && (
-          <button
-            className="mobile-backdrop"
-            aria-label="Închide meniul"
-            onClick={() => setMobile(false)}
-          />
         )}
         <div className="content" key={path}>
           <div className="page-heading">
@@ -1429,7 +1490,7 @@ export function Workspace({
                   <Search size={17} />
                   <input
                     aria-label="Caută prospecte"
-                    placeholder="Caută după companie, contact, oraș sau email…"
+                    placeholder="Caută nume, email sau oraș…"
                     value={query}
                     onChange={(e) => {
                       setQuery(e.target.value);
@@ -1632,7 +1693,66 @@ export function Workspace({
                   </Button>
                 </div>
               )}
-              <div className="panel">
+              <div className="mobile-lead-list" aria-label="Lista de leaduri">
+                <div className="mobile-list-selection">
+                  <span>{filtered.length} rezultate</span>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      const ids = filtered
+                        .slice(page * 20, page * 20 + 20)
+                        .map((l) => l.id);
+                      setSelected(
+                        ids.every((id) => selected.includes(id))
+                          ? selected.filter((id) => !ids.includes(id))
+                          : [...new Set([...selected, ...ids])],
+                      );
+                    }}
+                  >
+                    Selectează pagina
+                  </Button>
+                </div>
+                {filtered.slice(page * 20, page * 20 + 20).map((l) => (
+                  <article className="mobile-lead-card" key={l.id}>
+                    <label className="mobile-lead-select">
+                      <input
+                        type="checkbox"
+                        aria-label={`Selectează ${l.company_name}`}
+                        checked={selected.includes(l.id)}
+                        onChange={(e) =>
+                          setSelected(
+                            e.target.checked
+                              ? [...selected, l.id]
+                              : selected.filter((id) => id !== l.id),
+                          )
+                        }
+                      />
+                    </label>
+                    <button
+                      className="mobile-lead-open"
+                      onClick={() => showLead(l.id)}
+                    >
+                      <strong>{l.company_name}</strong>
+                      <span>
+                        {[l.niche, l.city].filter(Boolean).join(" · ") ||
+                          "Profil de completat"}
+                      </span>
+                      <span className="mobile-lead-email">
+                        {l.email || l.phone || "Contact de completat"}
+                      </span>
+                      <span className="mobile-lead-meta">
+                        <Badge value={l.status} />
+                        {l.lead_score !== null && (
+                          <span>Scor {l.lead_score}</span>
+                        )}
+                      </span>
+                    </button>
+                    <ChevronRight size={19} aria-hidden="true" />
+                  </article>
+                ))}
+              </div>
+              <div className="panel leads-table-panel">
                 <Table>
                   <thead>
                     <tr>

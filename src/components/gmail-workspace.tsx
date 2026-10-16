@@ -1,9 +1,10 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
   ArrowUpRight,
+  ArrowLeft,
   Check,
   ChevronRight,
   Inbox,
@@ -642,6 +643,9 @@ export function GmailInbox({
   act,
 }: Props & { act: (action: string, input: unknown) => Promise<unknown> }) {
   const params = useSearchParams();
+  const threadTrigger = useRef<HTMLButtonElement | null>(null);
+  const threadBack = useRef<HTMLButtonElement | null>(null);
+  const [mobileThread, setMobileThread] = useState(!!params.get("lead"));
   const [query, setQuery] = useState(""),
     [mailbox, setMailbox] = useState(""),
     [selected, setSelected] = useState(""),
@@ -672,6 +676,14 @@ export function GmailInbox({
   const lead = conversation?.lead;
   const thread = conversation?.messages || [];
   const received = conversation?.received;
+  const hasActiveLead = !!lead;
+  useEffect(() => {
+    if (!window.matchMedia("(max-width: 960px)").matches) return;
+    if (mobileThread && hasActiveLead)
+      threadBack.current?.focus({ preventScroll: true });
+    else if (threadTrigger.current?.isConnected)
+      threadTrigger.current.focus({ preventScroll: true });
+  }, [mobileThread, active, hasActiveLead]);
   async function sync() {
     setBusy(true);
     setNotice("");
@@ -715,7 +727,9 @@ export function GmailInbox({
           {notice}
         </p>
       )}
-      <div className="panel gmail-unified-inbox">
+      <div
+        className={`panel gmail-unified-inbox ${mobileThread && lead ? "mobile-thread-open" : ""}`}
+      >
         <aside className="gmail-conversation-list">
           <div
             className="actions section-gap"
@@ -728,6 +742,7 @@ export function GmailInbox({
               onClick={() => {
                 setReplySection("all");
                 setSelected("");
+                setMobileThread(false);
               }}
             >
               Toate răspunsurile
@@ -738,6 +753,7 @@ export function GmailInbox({
               onClick={() => {
                 setReplySection("hot");
                 setSelected("");
+                setMobileThread(false);
               }}
             >
               Hot leads · {hotCount}
@@ -753,7 +769,10 @@ export function GmailInbox({
             Caută conversații
             <input
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setMobileThread(false);
+              }}
               placeholder="Nume sau adresă de email"
             />
           </label>
@@ -761,7 +780,10 @@ export function GmailInbox({
             Căsuță Gmail
             <select
               value={mailbox}
-              onChange={(e) => setMailbox(e.target.value)}
+              onChange={(e) => {
+                setMailbox(e.target.value);
+                setMobileThread(false);
+              }}
             >
               <option value="">Toate căsuțele</option>
               {data.gmail_accounts.map((account) => (
@@ -791,7 +813,11 @@ export function GmailInbox({
                   type="button"
                   className={`gmail-conversation ${active === id ? "selected" : ""}`}
                   aria-current={active === id ? "true" : undefined}
-                  onClick={() => setSelected(id)}
+                  onClick={(event) => {
+                    threadTrigger.current = event.currentTarget;
+                    setSelected(id);
+                    setMobileThread(true);
+                  }}
                   key={id}
                 >
                   <strong>{item?.company_name || "Conversație"}</strong>
@@ -829,6 +855,15 @@ export function GmailInbox({
           {lead ? (
             <>
               <header className="gmail-thread-header">
+                <Button
+                  ref={threadBack}
+                  className="mobile-inbox-back"
+                  variant="ghost"
+                  onClick={() => setMobileThread(false)}
+                >
+                  <ArrowLeft size={18} aria-hidden="true" />
+                  Toate conversațiile
+                </Button>
                 <div>
                   <h3>{lead.company_name}</h3>
                   <a href={`mailto:${lead.email}`}>{lead.email}</a>
@@ -842,6 +877,11 @@ export function GmailInbox({
                   </span>
                 )}
               </header>
+              {notice && (
+                <p className="gmail-notice mobile-thread-notice" role="status">
+                  {notice}
+                </p>
+              )}
               <div className="gmail-thread-body">
                 {thread.map((message) => {
                   const meta = metadata(message.metadata),
