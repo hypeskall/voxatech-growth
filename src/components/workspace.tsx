@@ -5,6 +5,7 @@ import { AnimatedValue } from "./ambient";
 import { BrandMark } from "./brand-mark";
 import { MobileViewport } from "./mobile-viewport";
 import Link from "next/link";
+import { NavigationLink } from "./navigation-link";
 import { useRouter } from "next/navigation";
 import Papa from "papaparse";
 import {
@@ -880,8 +881,7 @@ export function Workspace({
         </Link>
         <nav className="nav">
           {nav.map(([url, label, Icon]) => (
-            <Link
-              prefetch={false}
+            <NavigationLink
               key={url}
               href={`/${url}`}
               className={
@@ -906,13 +906,12 @@ export function Workspace({
                     }
                   </span>
                 )}
-            </Link>
+            </NavigationLink>
           ))}
         </nav>
         <div className="nav-bottom">
           <nav className="nav">
-            <Link
-              prefetch={false}
+            <NavigationLink
               href="/settings"
               className={
                 section === "settings" && path !== "settings/account"
@@ -922,15 +921,14 @@ export function Workspace({
             >
               <Settings size={18} />
               Settings
-            </Link>
-            <Link
-              prefetch={false}
+            </NavigationLink>
+            <NavigationLink
               href="/settings/account"
               className={path === "settings/account" ? "active" : ""}
             >
               <Users size={18} />
               Account
-            </Link>
+            </NavigationLink>
           </nav>
         </div>
         <div className="account">
@@ -963,15 +961,14 @@ export function Workspace({
             ["dashboard", "leads", "autopilot", "inbox"].includes(url),
           )
           .map(([url, label, Icon]) => (
-            <Link
+            <NavigationLink
               key={url}
-              prefetch={false}
               href={`/${url}`}
               aria-current={section === url ? "page" : undefined}
             >
               <Icon size={21} aria-hidden="true" />
               <span>{label === "Dashboard" ? "Acasă" : label}</span>
-            </Link>
+            </NavigationLink>
           ))}
         <button
           type="button"
@@ -1000,17 +997,16 @@ export function Workspace({
             ["settings", "Setări", Settings],
             ["settings/account", "Contul meu", Users],
           ].map(([url, label, Icon]) => (
-            <Link
+            <NavigationLink
               key={String(url)}
               href={`/${url}`}
-              prefetch={false}
               onClick={() => setMobile(false)}
               aria-current={path === url ? "page" : undefined}
             >
               <Icon size={21} aria-hidden="true" />
               <span>{String(label)}</span>
               <ChevronRight size={18} aria-hidden="true" />
-            </Link>
+            </NavigationLink>
           ))}
         </nav>
         <p className="mobile-account-email">{data.user.email}</p>
