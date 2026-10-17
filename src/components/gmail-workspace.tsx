@@ -353,13 +353,17 @@ export function GmailAutopilotPanel({ data, manager, refresh }: Props) {
       0,
     ),
     capacity = connected.reduce((sum, account) => sum + account.daily_cap, 0);
-  const ready =
-    data.providers.gmail &&
-    data.providers.google_gemini &&
-    data.providers.gmail_scheduler &&
-    connected.length > 0 &&
-    connected.every((account) => !!account.last_test_at) &&
-    data.delivery === "live";
+  const setupProblems = [
+    !data.providers.gmail && "Finalizează configurarea conexiunii Google.",
+    !data.providers.google_gemini && "Configurează asistentul AI pe server.",
+    !data.providers.gmail_scheduler &&
+      "Configurează programarea automată pe server.",
+    !connected.length && "Conectează cel puțin o căsuță Gmail.",
+    connected.some((account) => !account.last_test_at) &&
+      "Trimite un test intern din fiecare căsuță Gmail conectată.",
+    data.delivery !== "live" &&
+      "Activează livrarea reală în configurația serverului (EMAIL_DELIVERY_MODE=live), apoi publică din nou aplicația.",
+  ].filter(Boolean);
   async function act(action: string) {
     setBusy(true);
     setNotice("");
@@ -430,12 +434,14 @@ export function GmailAutopilotPanel({ data, manager, refresh }: Props) {
           )}
           <Button
             disabled={
-              !manager ||
-              busy ||
-              (!data.gmail_autopilot_enabled && (!ready || !leadListId))
+              !manager || busy || (!data.gmail_autopilot_enabled && !leadListId)
             }
             onClick={() =>
-              data.gmail_autopilot_enabled ? act("pause") : setConfirm(true)
+              data.gmail_autopilot_enabled
+                ? act("pause")
+                : setupProblems.length
+                  ? setNotice(setupProblems.join(" "))
+                  : setConfirm(true)
             }
           >
             {data.gmail_autopilot_enabled ? (
