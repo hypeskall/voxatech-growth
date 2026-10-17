@@ -32,6 +32,51 @@ const grid = [
     "1.234",
   ],
 ];
+
+test("recognizes Romanian clinic workbook headers without confusing email source columns", () => {
+  const headers = [
+    "Clinică / cabinet",
+    "Email",
+    "Localitate",
+    "Județ",
+    "Telefon",
+    "Stare sursă email",
+    "Contact nominal",
+    "Website",
+    "Adresă",
+    "Data listei-sursă",
+    "Sursa contactului",
+    "Sursa emailului",
+    "Consultat la",
+    "Status campanie",
+    "Emailuri suplimentare",
+    "Tip adresă",
+  ];
+  const mapping = guessMapping(headers);
+  assert.equal(mapping.company_name, "Clinică / cabinet");
+  assert.equal(mapping.contact_name, "Contact nominal");
+  assert.equal(mapping.email, "Email");
+  assert.equal(mapping.notes, "Adresă");
+  const row = [
+    "Cabinet Exemplu",
+    "office@example.test",
+    "Iași",
+    "Iași",
+    "0722123456",
+    "Publicat 2026",
+    "Dr. Exemplu",
+    "",
+    "Strada Exemplu 1",
+  ];
+  const { records } = sheetRecords(
+    { name: "Leads", rows: [headers, row], headerRow: 0 },
+    0,
+  );
+  const lead = mappedLead(records[0], mapping, "clinici.xlsx");
+  assert.equal(lead.company_name, "Cabinet Exemplu");
+  assert.equal(lead.contact_name, "Dr. Exemplu");
+  assert.equal(lead.website, null);
+});
 function workbook(type, rows = grid) {
   const book = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(
