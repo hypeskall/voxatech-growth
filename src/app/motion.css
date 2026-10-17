@@ -1,0 +1,207 @@
+/* Keep navigation quick; animate opacity on the page so fixed mobile UI
+   keeps its viewport positioning throughout the transition. */
+@media (prefers-reduced-motion: no-preference) {
+  .content {
+    animation: screen-reveal 240ms ease-out;
+  }
+
+  .content > .page-heading {
+    animation: surface-reveal 280ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  :where(
+    .button,
+    .icon-button,
+    .nav a,
+    .subnav a,
+    .tab,
+    .mobile-tabs > a,
+    .mobile-tabs > button,
+    .mobile-navigation a,
+    .mobile-lead-open,
+    .gmail-conversation
+  ) {
+    transition:
+      transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+      background-color 160ms ease,
+      color 160ms ease,
+      border-color 160ms ease,
+      box-shadow 160ms ease;
+  }
+
+  /* Match existing button/nav specificity so their older transitions
+     don't remove the press-and-release easing. */
+  .button,
+  .nav a {
+    transition:
+      transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+      background-color 160ms ease,
+      color 160ms ease,
+      border-color 160ms ease,
+      box-shadow 160ms ease;
+  }
+
+  :where(
+      .button,
+      .icon-button,
+      .nav a,
+      .subnav a,
+      .tab,
+      .mobile-tabs > a,
+      .mobile-tabs > button,
+      .mobile-navigation a,
+      .mobile-lead-open
+    ):not(:disabled):not([aria-disabled="true"]):active {
+    transform: scale(0.97);
+    transition-duration: 80ms;
+  }
+
+  .gmail-conversation:not(:disabled):active {
+    transform: scale(0.99);
+    transition-duration: 80ms;
+  }
+
+  .modal-overlay[data-state="open"],
+  .drawer-overlay[data-state="open"] {
+    animation: fade-in 200ms ease-out;
+  }
+
+  .modal-overlay[data-state="closed"],
+  .drawer-overlay[data-state="closed"] {
+    animation: overlay-dismiss 160ms ease-in;
+  }
+
+  /* Individual translate/scale preserve the modal's centering transform. */
+  .modal-content[data-state="open"] {
+    animation: dialog-reveal 240ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .modal-content[data-state="closed"] {
+    animation: dialog-dismiss 160ms ease-in;
+  }
+
+  .lead-drawer[data-state="open"] {
+    animation: drawer-enter 280ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .lead-drawer[data-state="closed"] {
+    animation: drawer-dismiss 180ms ease-in;
+  }
+
+  .toast {
+    animation: surface-reveal 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  @media (max-width: 960px) {
+    .modal-content[data-state="open"] {
+      animation: sheet-reveal 280ms cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    .modal-content[data-state="closed"] {
+      animation: sheet-dismiss 180ms ease-in;
+    }
+
+    .mobile-thread-open > .gmail-conversation-detail {
+      animation: thread-reveal 260ms cubic-bezier(0.22, 1, 0.36, 1);
+    }
+  }
+}
+
+@keyframes screen-reveal {
+  from {
+    opacity: 0.45;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes surface-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes overlay-dismiss {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes dialog-reveal {
+  from {
+    opacity: 0;
+    translate: 0 8px;
+    scale: 0.985;
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+    scale: 1;
+  }
+}
+
+@keyframes dialog-dismiss {
+  from {
+    opacity: 1;
+    translate: 0 0;
+    scale: 1;
+  }
+  to {
+    opacity: 0;
+    translate: 0 4px;
+    scale: 0.99;
+  }
+}
+
+@keyframes drawer-dismiss {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+
+@keyframes sheet-reveal {
+  from {
+    opacity: 0;
+    translate: 0 24px;
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+@keyframes sheet-dismiss {
+  from {
+    opacity: 1;
+    translate: 0 0;
+  }
+  to {
+    opacity: 0;
+    translate: 0 16px;
+  }
+}
+
+@keyframes thread-reveal {
+  from {
+    opacity: 0.5;
+    transform: translateX(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
