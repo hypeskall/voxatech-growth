@@ -27,7 +27,6 @@ import {
   Menu,
   CalendarDays,
   Sparkles,
-  ShieldCheck,
   Clock,
   Play,
   Pause,
@@ -1166,17 +1165,6 @@ export function Workspace({
               )}
             </div>
           </div>
-          {data.delivery === "log" && (
-            <div className="delivery-note">
-              <ShieldCheck size={14} />
-              <span>Mod ciornă · niciun email extern</span>
-              <span className="sr-only">
-                Niciun email extern nu este trimis. Trimiterea rămâne în modul
-                log.
-              </span>
-              <Link href="/settings/integrations">Configurare email</Link>
-            </div>
-          )}
           {section === "settings" && (
             <nav className="subnav" aria-label="Setări">
               <Link href="/settings">General</Link>

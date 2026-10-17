@@ -299,12 +299,6 @@ export function CampaignReviewCenter({
             </div>
           ))}
         </div>
-        {!liveMode && (
-          <p className="callout section-gap">
-            Modul local este activ. Testele pot merge numai la adresa internă
-            configurată; activarea reală rămâne blocată.
-          </p>
-        )}
       </section>
 
       <section className="panel review-table-panel">

@@ -459,24 +459,6 @@ export function GmailAutopilotPanel({ data, manager, refresh }: Props) {
           {notice}
         </p>
       )}
-      {!ready && !data.gmail_autopilot_enabled && (
-        <div className="gmail-setup-strip">
-          <ShieldCheck size={18} aria-hidden="true" />
-          <p>
-            {!connected.length
-              ? "Conectează prima căsuță Gmail pentru a pregăti Autopilot."
-              : connected.some((account) => !account.last_test_at)
-                ? "Trimite un test intern din fiecare căsuță înainte de a porni Autopilot."
-                : data.delivery !== "live"
-                  ? "Livrarea este în modul de test. Verifică un email intern înainte de activare."
-                  : "Finalizează configurarea Google și a asistentului AI."}
-          </p>
-          <Link href="/settings/integrations">
-            Vezi conexiunile
-            <ChevronRight size={16} aria-hidden="true" />
-          </Link>
-        </div>
-      )}
       <div className="gmail-flow-stats">
         <div>
           <strong>{candidates.length}</strong>
