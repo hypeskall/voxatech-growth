@@ -114,7 +114,7 @@ export async function getSnapshot(
         section === "dashboard" && table === "activities"
           ? "id,organization_id,lead_id,action,model,created_at"
           : section === "dashboard" && table === "messages"
-            ? "id,organization_id,lead_id,direction,provider,sent_at,status,metadata,received_at,created_at"
+            ? "id,organization_id,lead_id,direction,provider,sent_at,status,body,metadata,received_at,created_at"
             : section === "dashboard" && table === "leads"
               ? "id,organization_id,company_name,email,status,source,currency,revenue_won,created_at,deleted_at,lead_list_id"
               : "*";

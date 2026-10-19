@@ -568,7 +568,7 @@ export function GmailAutopilotPanel({ data, manager, refresh }: Props) {
                       "Expeditor necunoscut",
                   )}
                 </strong>
-                <p>{message.body.slice(0, 140)}</p>
+                <p>{(message.body || "").slice(0, 140)}</p>
                 <small>
                   Primit în{" "}
                   {String(
