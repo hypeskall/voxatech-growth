@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { inboxConversations } from "../src/lib/gmail-inbox.ts";
+import {
+  inboxConversations,
+  isDeliveryNotification,
+  isInboxReply,
+} from "../src/lib/gmail-inbox.ts";
 const data = {
   campaigns: [
     { id: "a", sender_identity: "a@gmail.com" },
@@ -144,4 +148,89 @@ test("reply sections exclude outbound-only threads and hot leads require confide
   reply.metadata.sender_mismatch = false;
   sample.leads[0].do_not_contact = true;
   assert.equal(inboxConversations(sample, "", "", false, true, true).length, 0);
+});
+
+test("delivery failures are hidden from replies, hot leads and attention without removing history", () => {
+  const sample = structuredClone(data);
+  for (const from_email of [
+    "mailer-daemon@googlemail.com",
+    "MAILER-DAEMON@yahoo.com",
+    "Mail Delivery Subsystem <mailer-daemon@googlemail.com>",
+    "postmaster@outlook.com",
+    "mailer-daemon+notice@example.com",
+  ]) {
+    const bounce = {
+      id: "bounce",
+      lead_id: "lead-1",
+      direction: "inbound",
+      created_at: "2026-10-15T10:00:00Z",
+      classification: "positive",
+      metadata: { from_email, is_hot_lead: true, classification_confidence: 1 },
+    };
+    assert.equal(isDeliveryNotification(bounce), true);
+    assert.equal(isInboxReply(bounce), false);
+    const bounceOnly = {
+      ...sample,
+      leads: sample.leads.map((lead) => ({
+        ...lead,
+        status: "HUMAN_REQUIRED",
+      })),
+      messages: [
+        ...sample.messages.filter((m) => m.direction === "outbound"),
+        bounce,
+      ],
+    };
+    assert.deepEqual(inboxConversations(bounceOnly, "", "", false, true), []);
+    assert.deepEqual(inboxConversations(bounceOnly, "", "", true, true), []);
+    assert.deepEqual(
+      inboxConversations(bounceOnly, "", "", false, true, true),
+      [],
+    );
+    assert.equal(
+      bounceOnly.messages.at(-1),
+      bounce,
+      "the stored history stays intact",
+    );
+  }
+});
+
+test("a delivery notice does not replace or reorder a real reply in a mixed conversation", () => {
+  const sample = structuredClone(data);
+  sample.messages.push({
+    id: "late-bounce",
+    lead_id: "lead-1",
+    direction: "inbound",
+    created_at: "2026-10-16T10:00:00Z",
+    metadata: {
+      from_email: "mailer-daemon@googlemail.com",
+      sender_mismatch: true,
+    },
+  });
+  const conversations = inboxConversations(sample, "", "", false, true);
+  assert.deepEqual(
+    conversations.map((c) => c.id),
+    ["lead-2", "lead-1"],
+  );
+  const thread = conversations.find((c) => c.id === "lead-1");
+  assert.equal(thread.received.id, "reply");
+  assert.equal(thread.latest.id, "reply");
+  assert.equal(thread.attention, false);
+  assert.ok(thread.messages.every((m) => m.id !== "late-bounce"));
+  for (const from_email of [
+    "doctor@clinica.ro",
+    "mailer-daemon-sales@clinica.ro",
+    "manager@cabinet.ro",
+  ]) {
+    assert.equal(
+      isInboxReply({ direction: "inbound", metadata: { from_email } }),
+      true,
+    );
+  }
+  assert.equal(
+    isDeliveryNotification({
+      direction: "outbound",
+      metadata: { from_email: "postmaster@example.com" },
+    }),
+    false,
+  );
 });

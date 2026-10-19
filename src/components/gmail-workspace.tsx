@@ -21,7 +21,7 @@ import type { Snapshot } from "@/lib/snapshot";
 import { approvedOutreachTemplate } from "@/lib/outreach-template";
 import { validProspectEmail } from "@/lib/launch";
 import { dateTime, sendingWindow } from "@/lib/domain";
-import { inboxConversations } from "@/lib/gmail-inbox";
+import { inboxConversations, isInboxReply } from "@/lib/gmail-inbox";
 
 type Props = { data: Snapshot; manager: boolean; refresh: () => Promise<void> };
 const statusLabel: Record<string, string> = {
@@ -308,9 +308,7 @@ export function GmailAutopilotPanel({ data, manager, refresh }: Props) {
   const connected = data.gmail_accounts.filter(
     (account) => account.status === "connected",
   );
-  const inbound = data.messages.filter(
-    (message) => message.direction === "inbound",
-  );
+  const inbound = data.messages.filter(isInboxReply);
   const outbound = data.messages.filter(
     (message) =>
       message.direction === "outbound" &&

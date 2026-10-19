@@ -4,6 +4,7 @@ import { Search, ArrowRight, Activity } from "lucide-react";
 import { AnimatedValue } from "./ambient";
 import type { Snapshot } from "@/lib/snapshot";
 import { dateTime } from "@/lib/domain";
+import { isInboxReply } from "@/lib/gmail-inbox";
 export function GrowthDashboard({ data }: { data: Snapshot }) {
   const production = data.leads.filter(
     (l) =>
@@ -32,7 +33,7 @@ export function GrowthDashboard({ data }: { data: Snapshot }) {
       .map((m) => m.lead_id),
   ).size;
   const replied = new Set(
-    messages.filter((m) => m.direction === "inbound").map((m) => m.lead_id),
+    messages.filter(isInboxReply).map((m) => m.lead_id),
   ).size;
   const qualified = production.filter((l) =>
     [

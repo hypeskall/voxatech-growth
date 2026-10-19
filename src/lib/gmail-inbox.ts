@@ -5,6 +5,18 @@ export function messageMetadata(value: unknown): Record<string, unknown> {
     ? (value as Record<string, unknown>)
     : {};
 }
+export function isDeliveryNotification(
+  message: Pick<Message, "direction" | "metadata">,
+) {
+  if (message.direction !== "inbound") return false;
+  const meta = messageMetadata(message.metadata);
+  const from = String(meta.from_email || "").trim();
+  const address = (from.match(/<([^<>]+)>/)?.[1] || from).trim();
+  return /^(?:mailer-daemon|postmaster)(?:\+[^@\s]+)?@[^@\s]+$/i.test(address);
+}
+export function isInboxReply(message: Pick<Message, "direction" | "metadata">) {
+  return message.direction === "inbound" && !isDeliveryNotification(message);
+}
 export function messageMailbox(
   message: Message,
   campaigns: Snapshot["campaigns"],
@@ -34,6 +46,7 @@ export function inboxConversations(
 ) {
   const grouped = new Map<string, Message[]>();
   for (const message of data.messages) {
+    if (isDeliveryNotification(message)) continue;
     if (mailbox && messageMailbox(message, data.campaigns) !== mailbox)
       continue;
     const messages = grouped.get(message.lead_id) || [];

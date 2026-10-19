@@ -73,6 +73,7 @@ import {
   type Row,
 } from "@/lib/domain";
 import type { Snapshot } from "@/lib/snapshot";
+import { isInboxReply } from "@/lib/gmail-inbox";
 import type { Json } from "@/lib/supabase/database.types";
 const nav = [
   ["dashboard", "Dashboard", LayoutDashboard],
@@ -796,7 +797,7 @@ export function Workspace({
   );
   const replied = new Set(
     cohortMessages
-      .filter((m) => m.direction === "inbound")
+      .filter(isInboxReply)
       .map((m) => m.lead_id),
   );
   const qualifiedReached = new Set([
@@ -896,12 +897,12 @@ export function Workspace({
               {label}
               {url === "inbox" &&
                 data.messages.filter(
-                  (m) => m.direction === "inbound" && !m.classification,
+                  (m) => isInboxReply(m) && !m.classification,
                 ).length > 0 && (
                   <span className="badge purple">
                     {
                       data.messages.filter(
-                        (m) => m.direction === "inbound" && !m.classification,
+                        (m) => isInboxReply(m) && !m.classification,
                       ).length
                     }
                   </span>
@@ -1237,7 +1238,7 @@ export function Workspace({
                     value={
                       new Set(
                         data.messages
-                          .filter((m) => m.direction === "inbound")
+                          .filter(isInboxReply)
                           .map((m) => m.lead_id),
                       ).size
                     }
@@ -1826,7 +1827,7 @@ export function Workspace({
                               data.messages.find(
                                 (m) =>
                                   m.lead_id === l.id &&
-                                  m.direction === "inbound",
+                                  isInboxReply(m),
                               )?.classification === "positive"
                                 ? "Interested"
                                 : l.status
