@@ -1069,6 +1069,133 @@ test("organization-scoped workers do not claim another tenant and deferral prese
     await db.exec("rollback");
   }
 });
+test("delivery retries stay in today's window and respect closing, weekends and Bucharest DST", async () => {
+  const cases = [
+    ["2026-10-19T08:15:00+03:00", true, "2026-10-19T08:15:00+03:00"],
+    ["2026-10-19T11:59:00+03:00", true, "2026-10-19T11:59:00+03:00"],
+    ["2026-10-19T07:45:00+03:00", true, "2026-10-19T08:00:00+03:00"],
+    ["2026-10-19T12:00:00+03:00", true, "2026-10-20T08:00:00+03:00"],
+    ["2026-10-19T12:05:00+03:00", true, "2026-10-20T08:00:00+03:00"],
+    ["2026-10-23T12:05:00+03:00", true, "2026-10-26T08:00:00+02:00"],
+    ["2026-10-24T09:00:00+03:00", true, "2026-10-26T08:00:00+02:00"],
+    ["2026-10-25T09:00:00+02:00", true, "2026-10-26T08:00:00+02:00"],
+    ["2026-10-24T09:00:00+03:00", false, "2026-10-24T09:00:00+03:00"],
+    ["2027-03-26T12:05:00+02:00", true, "2027-03-29T08:00:00+03:00"],
+  ];
+  for (const [ready, weekdays, expected] of cases) {
+    const { rows } = await db.query(
+      "select private.delivery_retry_at($1,'08:00','12:00',$2) as retry",
+      [ready, weekdays],
+    );
+    assert.equal(
+      new Date(rows[0].retry).toISOString(),
+      new Date(expected).toISOString(),
+      ready,
+    );
+  }
+});
+
+test("deferred deliveries honor mailbox pacing, fence expired leases and remain service-only", async () => {
+  await db.exec("begin");
+  try {
+    await db.query("select set_config('request.jwt.claim.sub',$1,true)", [
+      userA,
+    ]);
+    const campaign = (
+      await db.query(
+        "insert into public.campaigns(organization_id,name,sender_identity,status,mode,weekdays_only,window_start,window_end) values($1,'Retry fixture','retry@gmail.com','active','automatic',false,'08:00','12:00') returning id",
+        [orgA],
+      )
+    ).rows[0].id;
+    const mailbox = (
+      await db.query(
+        "insert into public.gmail_accounts(organization_id,email,google_subject,encrypted_refresh_token,campaign_id,next_send_at) values($1,'retry@gmail.com','retry-fixture','encrypted-fixture',$2,(((now() at time zone 'Europe/Bucharest')::date+7)+time '08:30') at time zone 'Europe/Bucharest') returning next_send_at",
+        [orgA, campaign],
+      )
+    ).rows[0];
+    const message = (
+      await db.query(
+        "insert into public.messages(organization_id,lead_id,campaign_id,direction,body,status,idempotency_key) values($1,$2,$3,'outbound','Retry fixture','queued','retry-fixture') returning id",
+        [orgA, leadA, campaign],
+      )
+    ).rows[0].id;
+    const job = (
+      await db.query(
+        "insert into public.automation_jobs(organization_id,kind,idempotency_key,payload,status,attempts,locked_until,lock_token) values($1,'send_due_messages','retry-fixture',jsonb_build_object('message_id',$2::text),'running',1,now()+interval '5 minutes',gen_random_uuid()) returning id,lock_token",
+        [orgA, message],
+      )
+    ).rows[0];
+    await db.exec("set local role service_role");
+    assert.equal(
+      (
+        await db.query(
+          "select public.defer_automation_job($1,gen_random_uuid()) ok",
+          [job.id],
+        )
+      ).rows[0].ok,
+      false,
+    );
+    assert.equal(
+      (
+        await db.query("select public.defer_automation_job($1,$2) ok", [
+          job.id,
+          job.lock_token,
+        ])
+      ).rows[0].ok,
+      true,
+    );
+    assert.equal(
+      (
+        await db.query("select public.defer_automation_job($1,$2) ok", [
+          job.id,
+          job.lock_token,
+        ])
+      ).rows[0].ok,
+      false,
+      "a released lease cannot defer the job twice",
+    );
+    const deferred = (
+      await db.query(
+        "select status,attempts,next_action_at,lock_token,locked_until from public.automation_jobs where id=$1",
+        [job.id],
+      )
+    ).rows[0];
+    assert.equal(
+      new Date(deferred.next_action_at).toISOString(),
+      new Date(mailbox.next_send_at).toISOString(),
+    );
+    assert.equal(deferred.status, "pending");
+    assert.equal(deferred.attempts, 0);
+    assert.equal(deferred.lock_token, null);
+    assert.equal(deferred.locked_until, null);
+    await db.query(
+      "update public.automation_jobs set status='running',attempts=1,lock_token=$2,locked_until=now()-interval '1 second' where id=$1",
+      [job.id, job.lock_token],
+    );
+    assert.equal(
+      (
+        await db.query("select public.defer_automation_job($1,$2) ok", [
+          job.id,
+          job.lock_token,
+        ])
+      ).rows[0].ok,
+      false,
+      "expired workers cannot reschedule deliveries",
+    );
+    await db.exec("reset role");
+    for (const role of ["anon", "authenticated"]) {
+      const { rows } = await db.query(
+        "select has_function_privilege($1,'public.defer_automation_job(uuid,uuid)','execute') can_defer, has_function_privilege($1,'private.delivery_retry_at(timestamptz,time,time,boolean)','execute') can_plan",
+        [role],
+      );
+      assert.equal(rows[0].can_defer, false);
+      assert.equal(rows[0].can_plan, false);
+    }
+  } finally {
+    await db.exec("rollback");
+  }
+});
+
 test("scheduler and payment processing remain idempotent on repeated calls", async () => {
   await db.exec("begin");
   try {
@@ -1712,7 +1839,7 @@ test("Gmail Start and Pause are atomic, preserve one campaign per mailbox and re
       )
     ).rows[0].campaign_id;
     assert.equal(await call(true), 1);
-    // Restarting Autopilot must retain the morning policy used by reservation
+    // Restarting Autopilot must retain the daily policy used by reservation
     // and the final Gmail delivery recheck, including local timezone handling.
     const schedule = (
       await db.query(
@@ -1722,7 +1849,7 @@ test("Gmail Start and Pause are atomic, preserve one campaign per mailbox and re
     ).rows[0];
     assert.deepEqual(schedule, {
       window_start: "08:00:00",
-      window_end: "12:00:00",
+      window_end: "18:00:00",
       weekdays_only: true,
       daily_cap: 10,
     });
@@ -1730,7 +1857,9 @@ test("Gmail Start and Pause are atomic, preserve one campaign per mailbox and re
       ["2026-10-19T04:59:59Z", false],
       ["2026-10-19T05:00:00Z", true],
       ["2026-10-19T08:59:59Z", true],
-      ["2026-10-19T09:00:00Z", false],
+      ["2026-10-19T09:00:00Z", true],
+      ["2026-10-19T14:59:59Z", true],
+      ["2026-10-19T15:00:00Z", false],
       ["2026-10-24T08:00:00Z", false],
       ["2026-10-25T08:00:00Z", false],
       ["2026-10-26T05:59:59Z", false],

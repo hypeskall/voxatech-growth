@@ -454,7 +454,7 @@ export function GmailAutopilotPanel({ data, manager, refresh }: Props) {
               : "Pornește Autopilot"}
           </Button>
           <small>
-            Luni–vineri, 08:00–12:00
+            Luni–vineri, 08:00–18:00
             <br />
             Ora României · Weekend: pauză
           </small>
@@ -496,7 +496,7 @@ export function GmailAutopilotPanel({ data, manager, refresh }: Props) {
                 )
               ? "Limitele de azi sunt atinse. Trimiterile se reiau în următoarea zi de lucru."
               : !sendingWindow(new Date())
-                ? "Autopilot așteaptă intervalul de trimitere: luni–vineri, 08:00–12:00."
+                ? "Autopilot așteaptă intervalul de trimitere: luni–vineri, 08:00–18:00."
                 : !candidates.length &&
                     !data.campaign_leads.some(
                       (member) =>

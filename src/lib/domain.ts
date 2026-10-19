@@ -141,7 +141,7 @@ export function bucharest(date = new Date()) {
     weekday: !["Sat", "Sun"].includes(get("weekday")),
   };
 }
-export function sendingWindow(date: Date, start = "08:00", end = "12:00") {
+export function sendingWindow(date: Date, start = "08:00", end = "18:00") {
   const p = bucharest(date);
   return p.weekday && p.time >= start && p.time < end;
 }
